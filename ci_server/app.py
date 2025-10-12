@@ -54,16 +54,35 @@ async def submit_job_stream(request: Request, file: UploadFile = File(...)):
     """
     Run tests in Docker, stream results in real-time via SSE.
 
+    Creates a job ID and tracks the job so users can reconnect with 'ci wait'.
     Cancels the job if client disconnects (Ctrl-C).
     """
     zip_data = await file.read()
+    job_id = str(uuid.uuid4())
+
+    # Initialize job in store
+    jobs[job_id] = {
+        "id": job_id,
+        "status": "running",
+        "events": [],
+        "success": None,
+    }
 
     async def event_generator():
+        # First, send the job ID so client can print it
+        yield f"data: {json.dumps({'type': 'job_id', 'job_id': job_id})}\n\n"
+
         # Create async generator task
         gen = run_tests_in_docker_streaming(zip_data)
 
         try:
             async for event in gen:
+                # Store event in job history
+                jobs[job_id]["events"].append(event)
+                if event["type"] == "complete":
+                    jobs[job_id]["status"] = "completed"
+                    jobs[job_id]["success"] = event.get("success", False)
+
                 # Check if client has disconnected before yielding
                 if await request.is_disconnected():
                     # Close the generator to trigger cleanup/cancellation

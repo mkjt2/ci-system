@@ -46,7 +46,16 @@ def main():
             try:
                 success = False
                 for event in submit_tests_streaming(Path.cwd()):
-                    if event["type"] == "log":
+                    if event["type"] == "job_id":
+                        # Print job ID so user can reconnect from another terminal
+                        print(f"Job ID: {event['job_id']}", file=sys.stderr)
+                        print(
+                            "You can reconnect from another terminal with: ci wait "
+                            f"{event['job_id']}",
+                            file=sys.stderr,
+                        )
+                        print("", file=sys.stderr)  # Blank line
+                    elif event["type"] == "log":
                         print(event["data"], end="", flush=True)
                     elif event["type"] == "complete":
                         success = event["success"]
