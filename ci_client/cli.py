@@ -43,23 +43,39 @@ def main():
                 sys.exit(1)
         else:
             # Sync mode: submit and wait for completion (original behavior)
+            try:
+                success = False
+                for event in submit_tests_streaming(Path.cwd()):
+                    if event["type"] == "log":
+                        print(event["data"], end="", flush=True)
+                    elif event["type"] == "complete":
+                        success = event["success"]
+                sys.exit(0 if success else 1)
+            except KeyboardInterrupt:
+                print("\n\nJob submission interrupted by user.", file=sys.stderr)
+                print(
+                    "Note: The server may still be processing the job.",
+                    file=sys.stderr,
+                )
+                sys.exit(130)  # Standard exit code for SIGINT
+
+    elif args.command == "wait":
+        # Wait for a job and stream logs
+        try:
             success = False
-            for event in submit_tests_streaming(Path.cwd()):
+            for event in wait_for_job(args.job_id):
                 if event["type"] == "log":
                     print(event["data"], end="", flush=True)
                 elif event["type"] == "complete":
                     success = event["success"]
             sys.exit(0 if success else 1)
-
-    elif args.command == "wait":
-        # Wait for a job and stream logs
-        success = False
-        for event in wait_for_job(args.job_id):
-            if event["type"] == "log":
-                print(event["data"], end="", flush=True)
-            elif event["type"] == "complete":
-                success = event["success"]
-        sys.exit(0 if success else 1)
+        except KeyboardInterrupt:
+            print(f"\n\nStopped waiting for job {args.job_id}.", file=sys.stderr)
+            print(
+                "The job continues to run on the server. Use 'ci wait' to reconnect.",
+                file=sys.stderr,
+            )
+            sys.exit(130)  # Standard exit code for SIGINT
 
     parser.print_help()
     sys.exit(1)
