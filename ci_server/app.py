@@ -1,18 +1,76 @@
-import json
-import uuid
 import asyncio
+import json
+import os
+import uuid
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Dict, List, Any, Optional, AsyncGenerator
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from typing import Any
+
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
+
 from .executor import run_tests_in_docker, run_tests_in_docker_streaming
+from .models import Job, JobEvent
+from .repository import JobRepository
+from .sqlite_repository import SQLiteJobRepository
 
-app = FastAPI()
+# Global repository instance (initialized at startup)
+repository: JobRepository | None = None
 
-# In-memory job store (does not survive restarts)
-# Each job has: id (str), status (str), events (List[dict]), success (Optional[bool]),
-#               start_time (str), end_time (Optional[str])
-jobs: Dict[str, Dict[str, Any]] = {}
+
+def get_database_path() -> str:
+    """
+    Get the database path from environment or use default.
+
+    Returns:
+        Path to the SQLite database file
+
+    Environment variables:
+    - CI_DB_PATH: Custom database path (useful for testing)
+    """
+    return os.environ.get("CI_DB_PATH", "ci_jobs.db")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Lifespan context manager for FastAPI app.
+
+    Handles startup and shutdown events:
+    - Startup: Initialize database and create tables
+    - Shutdown: Close database connections
+    """
+    global repository
+
+    # Startup: Initialize the repository with configured database path
+    db_path = get_database_path()
+    repository = SQLiteJobRepository(db_path)
+    await repository.initialize()
+
+    yield
+
+    # Shutdown: Close repository connections
+    if repository:
+        await repository.close()
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+def get_repository() -> JobRepository:
+    """
+    Get the global repository instance.
+
+    Returns:
+        The initialized JobRepository
+
+    Raises:
+        RuntimeError: If repository is not initialized
+    """
+    if repository is None:
+        raise RuntimeError("Repository not initialized")
+    return repository
 
 
 async def process_job_async(job_id: str, zip_data: bytes) -> None:
@@ -26,25 +84,36 @@ async def process_job_async(job_id: str, zip_data: bytes) -> None:
     This function runs in the background and updates the job store
     with events as they occur during test execution.
     """
-    job = jobs[job_id]
-    job["status"] = "running"
-    job["start_time"] = datetime.utcnow().isoformat() + "Z"
+    repo = get_repository()
+
+    # Update job status to running
+    await repo.update_job_status(job_id, "running", start_time=datetime.utcnow())
 
     try:
         # Stream events from Docker execution and store them
-        async for event in run_tests_in_docker_streaming(zip_data):
-            job["events"].append(event)
-            if event["type"] == "complete":
-                job["status"] = "completed"
-                job["success"] = event["success"]
-                job["end_time"] = datetime.utcnow().isoformat() + "Z"
+        async for event_dict in run_tests_in_docker_streaming(zip_data):
+            # Convert dict to JobEvent and store
+            event = JobEvent.from_dict(event_dict, timestamp=datetime.utcnow())
+            await repo.add_event(job_id, event)
+
+            # If this is a completion event, mark job as completed
+            if event.type == "complete":
+                await repo.complete_job(
+                    job_id, success=event.success or False, end_time=datetime.utcnow()
+                )
     except Exception as e:
         # Handle any unexpected errors during job processing
-        job["events"].append({"type": "log", "data": f"Error: {e}\n"})
-        job["events"].append({"type": "complete", "success": False})
-        job["status"] = "completed"
-        job["success"] = False
-        job["end_time"] = datetime.utcnow().isoformat() + "Z"
+        error_event = JobEvent(
+            type="log", data=f"Error: {e}\n", timestamp=datetime.utcnow()
+        )
+        await repo.add_event(job_id, error_event)
+
+        complete_event = JobEvent(
+            type="complete", success=False, timestamp=datetime.utcnow()
+        )
+        await repo.add_event(job_id, complete_event)
+
+        await repo.complete_job(job_id, success=False, end_time=datetime.utcnow())
 
 
 @app.post("/submit")
@@ -64,16 +133,15 @@ async def submit_job_stream(request: Request, file: UploadFile = File(...)):
     """
     zip_data = await file.read()
     job_id = str(uuid.uuid4())
+    repo = get_repository()
 
-    # Initialize job in store
-    jobs[job_id] = {
-        "id": job_id,
-        "status": "running",
-        "events": [],
-        "success": None,
-        "start_time": datetime.utcnow().isoformat() + "Z",
-        "end_time": None,
-    }
+    # Create job in database
+    job = Job(
+        id=job_id,
+        status="running",
+        start_time=datetime.utcnow(),
+    )
+    await repo.create_job(job)
 
     async def event_generator():
         # First, send the job ID so client can print it
@@ -83,20 +151,25 @@ async def submit_job_stream(request: Request, file: UploadFile = File(...)):
         gen = run_tests_in_docker_streaming(zip_data)
 
         try:
-            async for event in gen:
-                # Store event in job history
-                jobs[job_id]["events"].append(event)
-                if event["type"] == "complete":
-                    jobs[job_id]["status"] = "completed"
-                    jobs[job_id]["success"] = event.get("success", False)
-                    jobs[job_id]["end_time"] = datetime.utcnow().isoformat() + "Z"
+            async for event_dict in gen:
+                # Store event in database
+                event = JobEvent.from_dict(event_dict, timestamp=datetime.utcnow())
+                await repo.add_event(job_id, event)
+
+                # Update job status if complete
+                if event.type == "complete":
+                    await repo.complete_job(
+                        job_id,
+                        success=event.success or False,
+                        end_time=datetime.utcnow(),
+                    )
 
                 # Check if client has disconnected before yielding
                 if await request.is_disconnected():
                     # Close the generator to trigger cleanup/cancellation
                     await gen.aclose()
                     return
-                yield f"data: {json.dumps(event)}\n\n"
+                yield f"data: {json.dumps(event_dict)}\n\n"
         finally:
             # Ensure generator is closed on any exit
             await gen.aclose()
@@ -109,7 +182,7 @@ async def submit_job_stream(request: Request, file: UploadFile = File(...)):
 
 
 @app.post("/submit-async")
-async def submit_job_async(file: UploadFile = File(...)) -> Dict[str, str]:
+async def submit_job_async(file: UploadFile = File(...)) -> dict[str, str]:
     """
     Submit a job and return job ID immediately. Job runs in background.
 
@@ -124,16 +197,14 @@ async def submit_job_async(file: UploadFile = File(...)) -> Dict[str, str]:
     """
     job_id = str(uuid.uuid4())
     zip_data = await file.read()
+    repo = get_repository()
 
-    # Initialize job entry in the store
-    jobs[job_id] = {
-        "id": job_id,
-        "status": "queued",  # Will become "running" then "completed"
-        "events": [],  # Accumulates log and complete events
-        "success": None,  # Set to True/False when job completes
-        "start_time": None,  # Set when job starts running
-        "end_time": None,  # Set when job completes
-    }
+    # Create job entry in the database
+    job = Job(
+        id=job_id,
+        status="queued",
+    )
+    await repo.create_job(job)
 
     # Start job processing in background (fire-and-forget)
     asyncio.create_task(process_job_async(job_id, zip_data))
@@ -163,41 +234,53 @@ async def stream_job_logs(
     for monitoring a running job from another terminal without seeing all history.
     With from_beginning=True, replays all events from the start.
     """
-    if job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
+    repo = get_repository()
+    job = await repo.get_job(job_id)
 
-    job = jobs[job_id]
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
 
     async def event_generator() -> AsyncGenerator[str, None]:
         # Check if job is already completed when starting
-        if job["status"] == "completed" and not from_beginning:
+        if job.status == "completed" and not from_beginning:
             # Job already completed and we're not showing history
             # Just send a status message and complete event
             yield f"data: {json.dumps({'type': 'log', 'data': 'Job already completed.\\n'})}\n\n"
             # Still send the complete event with final status
-            if job["events"] and job["events"][-1]["type"] == "complete":
-                yield f"data: {json.dumps(job['events'][-1])}\n\n"
+            if job.events and job.events[-1].type == "complete":
+                yield f"data: {json.dumps(job.events[-1].to_dict())}\n\n"
             return
 
         # Determine starting position
         if from_beginning:
             # Stream all existing events (replay from beginning)
-            for event in job["events"]:
-                yield f"data: {json.dumps(event)}\n\n"
+            for event in job.events:
+                yield f"data: {json.dumps(event.to_dict())}\n\n"
                 await asyncio.sleep(0.01)  # Small delay to avoid overwhelming client
-            last_index = len(job["events"])
+            last_index = len(job.events)
         else:
             # Start from current position (only new events)
-            last_index = len(job["events"])
+            last_index = len(job.events)
 
         # If job is still running, continue polling for new events
-        if job["status"] == "running":
-            while job["status"] == "running":
-                await asyncio.sleep(0.1)  # Poll interval
-                # Stream any new events that have arrived
-                while last_index < len(job["events"]):
-                    yield f"data: {json.dumps(job['events'][last_index])}\n\n"
+        if job.status == "running":
+            while True:
+                # Re-fetch job to get latest status
+                current_job = await repo.get_job(job_id)
+                if current_job is None:
+                    break
+
+                # Get new events since last check
+                new_events = await repo.get_events(job_id, from_index=last_index)
+                for event in new_events:
+                    yield f"data: {json.dumps(event.to_dict())}\n\n"
                     last_index += 1
+
+                # Check if job completed
+                if current_job.status == "completed":
+                    break
+
+                await asyncio.sleep(0.1)  # Poll interval
 
     return StreamingResponse(
         event_generator(),
@@ -207,27 +290,20 @@ async def stream_job_logs(
 
 
 @app.get("/jobs")
-async def list_jobs() -> List[Dict[str, Any]]:
+async def list_jobs() -> list[dict[str, Any]]:
     """
     List all jobs with their status and metadata.
 
     Returns:
         List of job dictionaries with job_id, status, success, start_time, and end_time
     """
-    return [
-        {
-            "job_id": job["id"],
-            "status": job["status"],
-            "success": job["success"],
-            "start_time": job.get("start_time"),
-            "end_time": job.get("end_time"),
-        }
-        for job in jobs.values()
-    ]
+    repo = get_repository()
+    jobs = await repo.list_jobs()
+    return [job.to_summary_dict() for job in jobs]
 
 
 @app.get("/jobs/{job_id}")
-async def get_job_status(job_id: str) -> Dict[str, Any]:
+async def get_job_status(job_id: str) -> dict[str, Any]:
     """
     Get job status and metadata (non-streaming).
 
@@ -240,14 +316,10 @@ async def get_job_status(job_id: str) -> Dict[str, Any]:
     Raises:
         HTTPException: 404 if job_id not found
     """
-    if job_id not in jobs:
+    repo = get_repository()
+    job = await repo.get_job(job_id)
+
+    if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    job = jobs[job_id]
-    return {
-        "job_id": job["id"],
-        "status": job["status"],  # "queued", "running", or "completed"
-        "success": job["success"],  # None until completed, then True/False
-        "start_time": job.get("start_time"),
-        "end_time": job.get("end_time"),
-    }
+    return job.to_summary_dict()

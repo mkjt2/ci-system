@@ -1,9 +1,9 @@
 import asyncio
+import io
 import tempfile
 import zipfile
-import io
+from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import AsyncGenerator
 
 
 async def run_tests_in_docker(zip_data: bytes) -> tuple[bool, str]:

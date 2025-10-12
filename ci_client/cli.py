@@ -1,9 +1,10 @@
-import sys
-import json
 import argparse
-from pathlib import Path
+import json
+import sys
 from datetime import datetime
-from .client import submit_tests_streaming, submit_tests_async, wait_for_job, list_jobs
+from pathlib import Path
+
+from .client import list_jobs, submit_tests_async, submit_tests_streaming, wait_for_job
 
 
 def main():

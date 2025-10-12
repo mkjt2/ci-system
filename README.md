@@ -85,6 +85,13 @@ Start the CI server:
 python -m uvicorn ci_server.app:app --port 8000
 ```
 
+**Custom Database Path:**
+```bash
+CI_DB_PATH=/path/to/custom.db python -m uvicorn ci_server.app:app --port 8000
+```
+
+Jobs are persisted to the SQLite database and survive server restarts.
+
 ## Development
 
 **Setup:**
@@ -105,10 +112,16 @@ pytest tests/e2e/ -v
   - `cli.py`: CLI commands (`submit`, `wait`, `list`)
   - `client.py`: HTTP client with sync/async submission and SSE streaming
 - **Server** (`ci_server/`): FastAPI app that runs pytest in Docker containers
-  - `app.py`: REST API endpoints with in-memory job store
+  - `app.py`: REST API endpoints with persistent job storage
   - `executor.py`: Docker execution with streaming output
+  - `repository.py`: Abstract interface for job persistence
+  - `sqlite_repository.py`: SQLite implementation (default)
+  - `models.py`: Data models for jobs and events
 - **Communication**: Server-Sent Events for real-time output streaming
-- **Job Storage**: In-memory (jobs do not survive server restarts)
+- **Job Storage**: SQLite database (persistent across server restarts)
+  - Default location: `ci_jobs.db`
+  - Configurable via `CI_DB_PATH` environment variable
+  - Ready for PostgreSQL/MySQL migration if needed
 
 ## Requirements
 

@@ -34,7 +34,10 @@ A simple CI system for Python projects. Users submit projects via CLI, which zip
   - `/jobs/{job_id}` - Get job status (queued/running/completed)
   - `/jobs/{job_id}/stream` - Stream job logs via SSE (supports reconnection)
 - `executor.py` - Executes pytest in Docker container, supports streaming output
-- In-memory job store - Tracks job state and events (does not persist across restarts)
+- `repository.py` - Abstract interface for job persistence (supports multiple backends)
+- `sqlite_repository.py` - SQLite implementation of repository (default)
+- `models.py` - Data models for Job and JobEvent
+- Persistent job store - SQLite database tracks job state and events (survives restarts)
 
 **Flow (Synchronous)**:
 1. User runs `ci submit test` from project root

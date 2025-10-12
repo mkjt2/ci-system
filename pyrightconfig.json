@@ -7,5 +7,7 @@
   "exclude": [
     "tests/fixtures"
   ],
-  "reportMissingModuleSource": false
+  "reportMissingModuleSource": false,
+  "reportUnusedImport": "error",
+  "reportUnusedVariable": "warning"
 }

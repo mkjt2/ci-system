@@ -1,19 +1,38 @@
-import subprocess
-import time
+import json
+import os
 import re
 import signal
-import json
+import subprocess
+import tempfile
+import time
 from pathlib import Path
+
 import pytest
 
 
 @pytest.fixture
-def server_process():
+def test_db_path():
+    """Create a temporary database file for testing."""
+    fd, path = tempfile.mkstemp(suffix=".db", prefix="ci_test_")
+    os.close(fd)
+    yield path
+    # Clean up test database after test
+    if os.path.exists(path):
+        os.unlink(path)
+
+
+@pytest.fixture
+def server_process(test_db_path):
     """Start the CI server and tear it down after the test."""
+    # Set environment variable to use test database
+    env = os.environ.copy()
+    env["CI_DB_PATH"] = test_db_path
+
     proc = subprocess.Popen(
         ["python", "-m", "uvicorn", "ci_server.app:app", "--port", "8000"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=env,
     )
     time.sleep(2)
     yield proc
@@ -288,3 +307,65 @@ def test_ci_list(server_process):
     # Should show success indicators (✓ for pass, ✗ for fail)
     assert "✓" in output
     assert "✗" in output
+
+
+def test_job_persistence_across_server_restart(server_process, test_db_path):
+    """Test that jobs persist when the server is restarted."""
+    # Submit a job and wait for it to complete
+    submit_result = run_ci_test("dummy_project", "submit", "test", "--async")
+    assert submit_result.returncode == 0
+    match = re.search(r"Job submitted: ([a-f0-9\-]{36})", submit_result.stdout)
+    assert match is not None
+    job_id = match.group(1)
+
+    # Wait for job to complete
+    time.sleep(5)
+
+    # Verify job exists and is completed
+    list_result = run_ci_test("dummy_project", "list", "--json")
+    assert list_result.returncode == 0
+    jobs_before = json.loads(list_result.stdout)
+    job_before = next((j for j in jobs_before if j["job_id"] == job_id), None)
+    assert job_before is not None
+    assert job_before["status"] == "completed"
+    assert job_before["success"] is True
+
+    # Restart the server
+    server_process.terminate()
+    server_process.wait(timeout=5)
+    time.sleep(1)
+
+    # Start a new server process with the same database
+    env = os.environ.copy()
+    env["CI_DB_PATH"] = test_db_path
+
+    new_proc = subprocess.Popen(
+        ["python", "-m", "uvicorn", "ci_server.app:app", "--port", "8000"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    time.sleep(2)
+
+    try:
+        # Verify job still exists after restart
+        list_result = run_ci_test("dummy_project", "list", "--json")
+        assert list_result.returncode == 0
+        jobs_after = json.loads(list_result.stdout)
+        job_after = next((j for j in jobs_after if j["job_id"] == job_id), None)
+
+        assert job_after is not None, f"Job {job_id} not found after server restart"
+        assert job_after["status"] == "completed"
+        assert job_after["success"] is True
+        assert job_after["start_time"] == job_before["start_time"]
+        assert job_after["end_time"] == job_before["end_time"]
+
+        # Also verify we can still wait for the job and see logs
+        wait_result = run_ci_test("dummy_project", "wait", job_id, "--all")
+        output = wait_result.stdout + wait_result.stderr
+        assert wait_result.returncode == 0
+        assert "test_add" in output
+        assert "test_subtract" in output
+    finally:
+        new_proc.terminate()
+        new_proc.wait(timeout=5)
