@@ -106,6 +106,27 @@ def submit_tests_async(
         raise RuntimeError(f"Error submitting to CI server: {e}")
 
 
+def list_jobs(server_url: str = "http://localhost:8000") -> list[dict]:
+    """
+    List all jobs from the CI server.
+
+    Args:
+        server_url: Base URL of the CI server
+
+    Returns:
+        List of job dictionaries with job_id, status, success, start_time, and end_time
+
+    Raises:
+        RuntimeError: If the request fails
+    """
+    try:
+        response = requests.get(f"{server_url}/jobs", timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"Error fetching jobs from CI server: {e}")
+
+
 def wait_for_job(
     job_id: str, server_url: str = "http://localhost:8000", from_beginning: bool = False
 ) -> Generator[dict, None, None]:

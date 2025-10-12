@@ -2,6 +2,7 @@ import subprocess
 import time
 import re
 import signal
+import json
 from pathlib import Path
 import pytest
 
@@ -219,3 +220,71 @@ def test_ci_wait_forward_only(server_process):
 
     # Should NOT see the full test output since we joined after completion
     # (This is the key difference from --all)
+
+
+def test_ci_list(server_process):
+    """Test that 'ci list' displays a table of all jobs."""
+    # Submit a couple of jobs
+    submit1 = run_ci_test("dummy_project", "submit", "test", "--async")
+    assert submit1.returncode == 0
+    match1 = re.search(r"Job submitted: ([a-f0-9\-]{36})", submit1.stdout)
+    assert match1 is not None
+    job_id1 = match1.group(1)
+
+    submit2 = run_ci_test("failing_project", "submit", "test", "--async")
+    assert submit2.returncode == 0
+    match2 = re.search(r"Job submitted: ([a-f0-9\-]{36})", submit2.stdout)
+    assert match2 is not None
+    job_id2 = match2.group(1)
+
+    # Wait for jobs to complete
+    time.sleep(5)
+
+    # Test JSON mode first (easier to parse and verify)
+    json_result = run_ci_test("dummy_project", "list", "--json")
+    assert json_result.returncode == 0
+
+    # Parse JSON output
+    jobs = json.loads(json_result.stdout)
+    assert isinstance(jobs, list)
+    assert len(jobs) == 2
+
+    # Find our jobs in the list
+    job1 = next((j for j in jobs if j["job_id"] == job_id1), None)
+    job2 = next((j for j in jobs if j["job_id"] == job_id2), None)
+
+    assert job1 is not None
+    assert job1["status"] == "completed"
+    assert job1["success"] is True  # dummy_project should pass
+    assert job1["start_time"] is not None
+    assert job1["end_time"] is not None
+
+    assert job2 is not None
+    assert job2["status"] == "completed"
+    assert job2["success"] is False  # failing_project should fail
+    assert job2["start_time"] is not None
+    assert job2["end_time"] is not None
+
+    # Also test human-readable table mode
+    table_result = run_ci_test("dummy_project", "list")
+    output = table_result.stdout
+
+    assert table_result.returncode == 0
+
+    # Should have table header
+    assert "JOB ID" in output
+    assert "STATUS" in output
+    assert "START TIME" in output
+    assert "END TIME" in output
+    assert "SUCCESS" in output
+
+    # Should show both job IDs
+    assert job_id1 in output
+    assert job_id2 in output
+
+    # Should show completed status for both
+    assert "completed" in output.lower()
+
+    # Should show success indicators (✓ for pass, ✗ for fail)
+    assert "✓" in output
+    assert "✗" in output

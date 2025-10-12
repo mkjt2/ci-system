@@ -47,13 +47,35 @@ ci submit test --async
 Later, wait for the job to complete and stream logs:
 
 ```bash
+# Show only new logs from current position (default)
 ci wait 1222e26a-e4d2-4dda-8ffa-ba333257cc1b
+
+# Show all logs from beginning
+ci wait 1222e26a-e4d2-4dda-8ffa-ba333257cc1b --all
 ```
 
 This is useful for:
 - Long-running test suites where you don't want to keep terminal open
 - Running multiple test jobs in parallel
 - Resuming log streaming if connection is interrupted
+
+### List Jobs
+
+View all jobs with their status:
+
+```bash
+# Human-readable table format
+ci list
+
+# Example output:
+# JOB ID                                 STATUS       START TIME             END TIME               SUCCESS
+# --------------------------------------------------------------------------------------------------------------
+# 1222e26a-e4d2-4dda-8ffa-ba333257cc1b   completed    2025-10-12 19:30:00    2025-10-12 19:30:05    ✓
+# 7ad3f8c9-2b41-4e89-9c12-5a8e7b3d1f4e   running      2025-10-12 19:31:10    N/A                    -
+
+# JSON format (useful for scripting)
+ci list --json
+```
 
 ## Running the Server
 
@@ -80,7 +102,7 @@ pytest tests/e2e/ -v
 ## Architecture
 
 - **Client** (`ci_client/`): CLI tool that zips projects and submits to server
-  - `cli.py`: CLI commands (`submit`, `wait`)
+  - `cli.py`: CLI commands (`submit`, `wait`, `list`)
   - `client.py`: HTTP client with sync/async submission and SSE streaming
 - **Server** (`ci_server/`): FastAPI app that runs pytest in Docker containers
   - `app.py`: REST API endpoints with in-memory job store

@@ -1,6 +1,7 @@
 import json
 import uuid
 import asyncio
+from datetime import datetime
 from typing import Dict, List, Any, Optional, AsyncGenerator
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -9,7 +10,8 @@ from .executor import run_tests_in_docker, run_tests_in_docker_streaming
 app = FastAPI()
 
 # In-memory job store (does not survive restarts)
-# Each job has: id (str), status (str), events (List[dict]), success (Optional[bool])
+# Each job has: id (str), status (str), events (List[dict]), success (Optional[bool]),
+#               start_time (str), end_time (Optional[str])
 jobs: Dict[str, Dict[str, Any]] = {}
 
 
@@ -26,6 +28,7 @@ async def process_job_async(job_id: str, zip_data: bytes) -> None:
     """
     job = jobs[job_id]
     job["status"] = "running"
+    job["start_time"] = datetime.utcnow().isoformat() + "Z"
 
     try:
         # Stream events from Docker execution and store them
@@ -34,12 +37,14 @@ async def process_job_async(job_id: str, zip_data: bytes) -> None:
             if event["type"] == "complete":
                 job["status"] = "completed"
                 job["success"] = event["success"]
+                job["end_time"] = datetime.utcnow().isoformat() + "Z"
     except Exception as e:
         # Handle any unexpected errors during job processing
         job["events"].append({"type": "log", "data": f"Error: {e}\n"})
         job["events"].append({"type": "complete", "success": False})
         job["status"] = "completed"
         job["success"] = False
+        job["end_time"] = datetime.utcnow().isoformat() + "Z"
 
 
 @app.post("/submit")
@@ -66,6 +71,8 @@ async def submit_job_stream(request: Request, file: UploadFile = File(...)):
         "status": "running",
         "events": [],
         "success": None,
+        "start_time": datetime.utcnow().isoformat() + "Z",
+        "end_time": None,
     }
 
     async def event_generator():
@@ -82,6 +89,7 @@ async def submit_job_stream(request: Request, file: UploadFile = File(...)):
                 if event["type"] == "complete":
                     jobs[job_id]["status"] = "completed"
                     jobs[job_id]["success"] = event.get("success", False)
+                    jobs[job_id]["end_time"] = datetime.utcnow().isoformat() + "Z"
 
                 # Check if client has disconnected before yielding
                 if await request.is_disconnected():
@@ -123,6 +131,8 @@ async def submit_job_async(file: UploadFile = File(...)) -> Dict[str, str]:
         "status": "queued",  # Will become "running" then "completed"
         "events": [],  # Accumulates log and complete events
         "success": None,  # Set to True/False when job completes
+        "start_time": None,  # Set when job starts running
+        "end_time": None,  # Set when job completes
     }
 
     # Start job processing in background (fire-and-forget)
@@ -196,6 +206,26 @@ async def stream_job_logs(
     )
 
 
+@app.get("/jobs")
+async def list_jobs() -> List[Dict[str, Any]]:
+    """
+    List all jobs with their status and metadata.
+
+    Returns:
+        List of job dictionaries with job_id, status, success, start_time, and end_time
+    """
+    return [
+        {
+            "job_id": job["id"],
+            "status": job["status"],
+            "success": job["success"],
+            "start_time": job.get("start_time"),
+            "end_time": job.get("end_time"),
+        }
+        for job in jobs.values()
+    ]
+
+
 @app.get("/jobs/{job_id}")
 async def get_job_status(job_id: str) -> Dict[str, Any]:
     """
@@ -218,4 +248,6 @@ async def get_job_status(job_id: str) -> Dict[str, Any]:
         "job_id": job["id"],
         "status": job["status"],  # "queued", "running", or "completed"
         "success": job["success"],  # None until completed, then True/False
+        "start_time": job.get("start_time"),
+        "end_time": job.get("end_time"),
     }
