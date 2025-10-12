@@ -1,6 +1,7 @@
 import subprocess
 import time
 import re
+import signal
 from pathlib import Path
 import pytest
 
@@ -114,3 +115,78 @@ def test_ci_wait_nonexistent_job(server_process):
     # Should fail with appropriate error
     assert result.returncode == 1
     assert "error" in output.lower() or "not found" in output.lower()
+
+
+def test_ci_submit_keyboard_interrupt(server_process):
+    """Test that 'ci submit test' handles Ctrl-C gracefully."""
+    project = Path(__file__).parent.parent / "fixtures" / "dummy_project"
+    proc = subprocess.Popen(
+        ["ci", "submit", "test"],
+        cwd=str(project),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    # Wait a bit for the job to start streaming
+    time.sleep(0.5)
+
+    # Send SIGINT (Ctrl-C)
+    proc.send_signal(signal.SIGINT)
+
+    # Wait for process to finish
+    stdout, stderr = proc.communicate(timeout=5)
+    output = stdout + stderr
+
+    # Should exit with code 130 (SIGINT)
+    assert proc.returncode == 130
+
+    # Should have friendly error message
+    assert "interrupted by user" in output.lower()
+    assert "server may still be processing" in output.lower()
+
+    # Should NOT have Python stack trace
+    assert "Traceback" not in output
+    assert "KeyboardInterrupt" not in output
+
+
+def test_ci_wait_keyboard_interrupt(server_process):
+    """Test that 'ci wait <job_id>' handles Ctrl-C gracefully."""
+    # First submit a job asynchronously
+    submit_result = run_ci_test("dummy_project", "submit", "test", "--async")
+    assert submit_result.returncode == 0
+    match = re.search(r"Job submitted: ([a-f0-9\-]{36})", submit_result.stdout)
+    assert match is not None
+    job_id = match.group(1)
+
+    # Start waiting for the job
+    project = Path(__file__).parent.parent / "fixtures" / "dummy_project"
+    proc = subprocess.Popen(
+        ["ci", "wait", job_id],
+        cwd=str(project),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    # Wait a bit for streaming to start
+    time.sleep(0.5)
+
+    # Send SIGINT (Ctrl-C)
+    proc.send_signal(signal.SIGINT)
+
+    # Wait for process to finish
+    stdout, stderr = proc.communicate(timeout=5)
+    output = stdout + stderr
+
+    # Should exit with code 130 (SIGINT)
+    assert proc.returncode == 130
+
+    # Should have friendly message
+    assert "stopped waiting" in output.lower()
+    assert "continues to run" in output.lower()
+    assert "ci wait" in output.lower()
+
+    # Should NOT have Python stack trace
+    assert "Traceback" not in output
+    assert "KeyboardInterrupt" not in output
