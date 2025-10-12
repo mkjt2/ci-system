@@ -48,3 +48,66 @@ def submit_tests_streaming(project_dir: Path, server_url: str = "http://localhos
     except requests.exceptions.RequestException as e:
         yield {"type": "log", "data": f"Error submitting to CI server: {e}\n"}
         yield {"type": "complete", "success": False}
+
+
+def submit_tests_async(project_dir: Path, server_url: str = "http://localhost:8000") -> str:
+    """
+    Submit tests to the CI server asynchronously and return job ID immediately.
+
+    Args:
+        project_dir: Path to the project directory to test
+        server_url: Base URL of the CI server
+
+    Returns:
+        str: UUID job ID that can be used to query job status or wait for completion
+
+    Raises:
+        RuntimeError: If submission fails due to network or server error
+
+    This function is non-blocking - it submits the project and returns immediately
+    with a job ID. The job runs in the background on the server.
+    """
+    try:
+        response = requests.post(
+            f"{server_url}/submit-async",
+            files={"file": ("project.zip", create_project_zip(project_dir), "application/zip")},
+            timeout=30,
+        )
+        response.raise_for_status()
+        result = response.json()
+        return result["job_id"]
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"Error submitting to CI server: {e}")
+
+
+def wait_for_job(job_id: str, server_url: str = "http://localhost:8000") -> Generator[dict, None, None]:
+    """
+    Wait for a job to complete and stream its output via Server-Sent Events.
+
+    Args:
+        job_id: UUID of the job to wait for
+        server_url: Base URL of the CI server
+
+    Yields:
+        dict: Event dictionaries with 'type' and other fields:
+            - {"type": "log", "data": str} - Log output from test execution
+            - {"type": "complete", "success": bool} - Final completion status
+
+    This function streams all logs from the beginning (supports reconnection).
+    If the job is still running, it will wait for new events to arrive.
+    """
+    try:
+        response = requests.get(
+            f"{server_url}/jobs/{job_id}/stream",
+            stream=True,
+            timeout=300,
+        )
+        response.raise_for_status()
+
+        # Parse SSE format: "data: {...}\n\n"
+        for line in response.iter_lines(decode_unicode=True):
+            if line and line.startswith("data: "):
+                yield json.loads(line[6:])
+    except requests.exceptions.RequestException as e:
+        yield {"type": "log", "data": f"Error waiting for job: {e}\n"}
+        yield {"type": "complete", "success": False}

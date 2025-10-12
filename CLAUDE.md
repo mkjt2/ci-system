@@ -2,6 +2,19 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Claude Code Instructions
+
+- Rerun unit / end to end tests often after every significant code change.
+- New features and functionality changes should be developed using TDD.
+- Ensure code is well structured, modular, and adheres to best practices.
+- Remember to use assertions to verify key invariants.
+- Write clear, concise code.
+- Code should be annotated with type hints diligently.
+- Code should be well commented, especially with intended functionality.
+- Always update README.md to reflect functionality changes.
+- Type checkers and lints should be run on all code (including tests)
+- 
+
 ## Project Overview
 
 A simple CI system for Python projects. Users submit projects via CLI, which zips and sends them to a FastAPI server. The server runs pytest in a Docker container and streams results back in real-time.
@@ -9,14 +22,20 @@ A simple CI system for Python projects. Users submit projects via CLI, which zip
 ## Architecture
 
 **Client** (`ci_client/`):
-- `cli.py` - CLI entry point, handles `ci submit test` command
-- `client.py` - HTTP client with streaming support (SSE)
+- `cli.py` - CLI entry point, handles `ci submit test [--async]` and `ci wait <job_id>` commands
+- `client.py` - HTTP client with streaming support (SSE), async submission, and job waiting
 
 **Server** (`ci_server/`):
-- `app.py` - FastAPI app with `/submit` (blocking) and `/submit-stream` (SSE) endpoints
+- `app.py` - FastAPI app with multiple endpoints:
+  - `/submit` - Synchronous blocking endpoint
+  - `/submit-stream` - Synchronous streaming endpoint (SSE)
+  - `/submit-async` - Asynchronous submission, returns job ID immediately
+  - `/jobs/{job_id}` - Get job status (queued/running/completed)
+  - `/jobs/{job_id}/stream` - Stream job logs via SSE (supports reconnection)
 - `executor.py` - Executes pytest in Docker container, supports streaming output
+- In-memory job store - Tracks job state and events (does not persist across restarts)
 
-**Flow**:
+**Flow (Synchronous)**:
 1. User runs `ci submit test` from project root
 2. CLI zips project (excluding `.` and `__pycache__`)
 3. Client POSTs zip to `/submit-stream`
@@ -24,6 +43,16 @@ A simple CI system for Python projects. Users submit projects via CLI, which zip
 5. Docker runs `pip install -q -r requirements.txt && python -m pytest -v`
 6. Output streams back to client as Server-Sent Events
 7. CLI prints output in real-time, exits with pytest's exit code
+
+**Flow (Asynchronous)**:
+1. User runs `ci submit test --async` from project root
+2. CLI zips project and POSTs to `/submit-async`
+3. Server generates job ID, stores job metadata, starts processing in background
+4. Server returns job ID immediately
+5. CLI prints job ID and exits
+6. User later runs `ci wait <job_id>`
+7. Client GETs `/jobs/{job_id}/stream` which streams all events (past and future)
+8. CLI prints output in real-time, exits with pytest's exit code
 
 ## Usage
 
@@ -34,7 +63,15 @@ A simple CI system for Python projects. Users submit projects via CLI, which zip
 
 **Running tests**:
 ```bash
+# Synchronous mode (default)
 ci submit test
+
+# Asynchronous mode
+ci submit test --async
+# Returns: Job submitted: <job_id>
+
+# Wait for async job
+ci wait <job_id>
 ```
 
 ## Development

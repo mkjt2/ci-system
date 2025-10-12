@@ -1,0 +1,11 @@
+{
+  "include": [
+    "ci_server",
+    "ci_client",
+    "tests/e2e"
+  ],
+  "exclude": [
+    "tests/fixtures"
+  ],
+  "reportMissingModuleSource": false
+}

@@ -42,6 +42,9 @@ async def run_tests_in_docker_streaming(zip_data: bytes) -> AsyncGenerator[dict,
                 stderr=asyncio.subprocess.STDOUT,
             )
 
+            # Assert stdout is available (we specified PIPE)
+            assert process.stdout is not None, "stdout should be available when PIPE is specified"
+
             while line := await process.stdout.readline():
                 yield {"type": "log", "data": line.decode()}
 

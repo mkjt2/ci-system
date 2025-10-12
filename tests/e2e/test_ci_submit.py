@@ -1,5 +1,6 @@
 import subprocess
 import time
+import re
 from pathlib import Path
 import pytest
 
@@ -18,11 +19,11 @@ def server_process():
     proc.wait(timeout=5)
 
 
-def run_ci_test(project_name):
-    """Helper to run ci submit test on a fixture project."""
+def run_ci_test(project_name, *args):
+    """Helper to run ci commands on a fixture project."""
     project = Path(__file__).parent.parent / "fixtures" / project_name
     return subprocess.run(
-        ["ci", "submit", "test"],
+        ["ci", *args],
         cwd=str(project),
         capture_output=True,
         text=True,
@@ -31,7 +32,7 @@ def run_ci_test(project_name):
 
 def test_ci_submit_passing_tests(server_process):
     """Test that 'ci submit test' works end-to-end with passing tests."""
-    result = run_ci_test("dummy_project")
+    result = run_ci_test("dummy_project", "submit", "test")
     output = result.stdout + result.stderr
     assert result.returncode == 0
     assert "test_add" in output
@@ -41,7 +42,7 @@ def test_ci_submit_passing_tests(server_process):
 
 def test_ci_submit_failing_tests(server_process):
     """Test that 'ci submit test' returns exit code 1 when tests fail."""
-    result = run_ci_test("failing_project")
+    result = run_ci_test("failing_project", "submit", "test")
     output = result.stdout + result.stderr
     assert result.returncode == 1
     assert "test_multiply" in output
@@ -51,7 +52,65 @@ def test_ci_submit_failing_tests(server_process):
 
 def test_ci_submit_invalid_code(server_process):
     """Test that 'ci submit test' handles invalid Python code gracefully."""
-    result = run_ci_test("invalid_project")
+    result = run_ci_test("invalid_project", "submit", "test")
     output = result.stdout + result.stderr
     assert result.returncode == 1
     assert "error" in output.lower() or "syntax" in output.lower()
+
+
+def test_ci_submit_async_mode(server_process):
+    """Test that 'ci submit test --async' returns job ID immediately."""
+    result = run_ci_test("dummy_project", "submit", "test", "--async")
+    output = result.stdout
+    assert result.returncode == 0
+    assert "Job submitted:" in output
+    # Extract job ID (UUID format)
+    match = re.search(r"Job submitted: ([a-f0-9\-]{36})", output)
+    assert match is not None, "Job ID not found in output"
+
+
+def test_ci_wait_for_job(server_process):
+    """Test that 'ci wait <job_id>' streams logs and returns correct exit code."""
+    # First submit a job asynchronously
+    submit_result = run_ci_test("dummy_project", "submit", "test", "--async")
+    assert submit_result.returncode == 0
+    match = re.search(r"Job submitted: ([a-f0-9\-]{36})", submit_result.stdout)
+    assert match is not None
+    job_id = match.group(1)
+
+    # Wait for the job to complete
+    time.sleep(2)  # Give job time to start/complete
+    wait_result = run_ci_test("dummy_project", "wait", job_id)
+    output = wait_result.stdout + wait_result.stderr
+    assert wait_result.returncode == 0
+    assert "test_add" in output
+    assert "test_subtract" in output
+    assert "passed" in output.lower()
+
+
+def test_ci_wait_for_failing_job(server_process):
+    """Test that 'ci wait <job_id>' returns exit code 1 for failing tests."""
+    # Submit a job with failing tests
+    submit_result = run_ci_test("failing_project", "submit", "test", "--async")
+    assert submit_result.returncode == 0
+    match = re.search(r"Job submitted: ([a-f0-9\-]{36})", submit_result.stdout)
+    assert match is not None
+    job_id = match.group(1)
+
+    # Wait for the job to complete
+    time.sleep(2)
+    wait_result = run_ci_test("failing_project", "wait", job_id)
+    output = wait_result.stdout + wait_result.stderr
+    assert wait_result.returncode == 1
+    assert "test_multiply" in output or "test_divide" in output
+    assert "failed" in output.lower()
+
+
+def test_ci_wait_nonexistent_job(server_process):
+    """Test that 'ci wait <job_id>' handles non-existent job IDs gracefully."""
+    fake_job_id = "00000000-0000-0000-0000-000000000000"
+    result = run_ci_test("dummy_project", "wait", fake_job_id)
+    output = result.stdout + result.stderr
+    # Should fail with appropriate error
+    assert result.returncode == 1
+    assert "error" in output.lower() or "not found" in output.lower()
