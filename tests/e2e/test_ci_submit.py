@@ -22,14 +22,37 @@ def test_db_path():
 
 
 @pytest.fixture
-def server_process(test_db_path):
+def worker_id(request):
+    """Get the worker ID for parallel test execution (pytest-xdist)."""
+    # When running without xdist, worker_id won't exist in config
+    if hasattr(request.config, "workerinput"):
+        return request.config.workerinput["workerid"]
+    return "master"
+
+
+@pytest.fixture
+def server_process(test_db_path, worker_id, monkeypatch):
     """Start the CI server and tear it down after the test."""
-    # Set environment variable to use test database
+    # Use a unique port for each worker to support parallel test execution
+    # worker_id is 'master' when not running in parallel, or 'gw0', 'gw1', etc. when parallel
+    if worker_id == "master":
+        port = 8000
+    else:
+        # Extract worker number from 'gw0', 'gw1', etc.
+        worker_num = int(worker_id.replace("gw", ""))
+        port = 8000 + worker_num + 1
+
+    # Set environment variables for both server and client
+    monkeypatch.setenv("CI_DB_PATH", test_db_path)
+    monkeypatch.setenv("CI_SERVER_URL", f"http://localhost:{port}")
+
+    # Start server with environment variables
     env = os.environ.copy()
     env["CI_DB_PATH"] = test_db_path
+    env["CI_SERVER_URL"] = f"http://localhost:{port}"
 
     proc = subprocess.Popen(
-        ["python", "-m", "uvicorn", "ci_server.app:app", "--port", "8000"],
+        ["python", "-m", "uvicorn", "ci_server.app:app", "--port", str(port)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
@@ -40,7 +63,7 @@ def server_process(test_db_path):
     proc.wait(timeout=5)
 
 
-def run_ci_test(project_name, *args):
+def run_ci_test(project_name, *args, env=None):
     """Helper to run ci commands on a fixture project."""
     project = Path(__file__).parent.parent / "fixtures" / project_name
     return subprocess.run(
@@ -48,7 +71,27 @@ def run_ci_test(project_name, *args):
         cwd=str(project),
         capture_output=True,
         text=True,
+        env=env,
     )
+
+
+def wait_for_job_completion(job_id, timeout=15):
+    """
+    Poll for job completion with timeout.
+
+    This is more reliable than fixed sleep times, especially under heavy load
+    during parallel test execution.
+    """
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        result = run_ci_test("dummy_project", "list", "--json")
+        if result.returncode == 0:
+            jobs = json.loads(result.stdout)
+            job = next((j for j in jobs if j["job_id"] == job_id), None)
+            if job and job["status"] == "completed":
+                return True
+        time.sleep(0.5)
+    return False
 
 
 def test_ci_submit_passing_tests(server_process):
@@ -224,8 +267,8 @@ def test_ci_wait_forward_only(server_process):
     assert match is not None
     job_id = match.group(1)
 
-    # Wait for the job to complete
-    time.sleep(5)  # Increased from 3 to ensure job completes
+    # Wait for the job to complete (poll instead of fixed sleep for reliability)
+    assert wait_for_job_completion(job_id), f"Job {job_id} did not complete in time"
 
     # Wait WITHOUT --all (should only see "Job already completed" message)
     wait_result = run_ci_test("dummy_project", "wait", job_id)
@@ -256,8 +299,9 @@ def test_ci_list(server_process):
     assert match2 is not None
     job_id2 = match2.group(1)
 
-    # Wait for jobs to complete
-    time.sleep(5)
+    # Wait for jobs to complete (poll instead of fixed sleep for reliability)
+    assert wait_for_job_completion(job_id1), f"Job {job_id1} did not complete in time"
+    assert wait_for_job_completion(job_id2), f"Job {job_id2} did not complete in time"
 
     # Test JSON mode first (easier to parse and verify)
     json_result = run_ci_test("dummy_project", "list", "--json")
@@ -311,6 +355,10 @@ def test_ci_list(server_process):
 
 def test_job_persistence_across_server_restart(server_process, test_db_path):
     """Test that jobs persist when the server is restarted."""
+    # Get the current server URL from environment
+    server_url = os.environ.get("CI_SERVER_URL", "http://localhost:8000")
+    port = server_url.split(":")[-1]
+
     # Submit a job and wait for it to complete
     submit_result = run_ci_test("dummy_project", "submit", "test", "--async")
     assert submit_result.returncode == 0
@@ -318,8 +366,8 @@ def test_job_persistence_across_server_restart(server_process, test_db_path):
     assert match is not None
     job_id = match.group(1)
 
-    # Wait for job to complete
-    time.sleep(5)
+    # Wait for job to complete (poll instead of fixed sleep for reliability)
+    assert wait_for_job_completion(job_id), f"Job {job_id} did not complete in time"
 
     # Verify job exists and is completed
     list_result = run_ci_test("dummy_project", "list", "--json")
@@ -335,12 +383,13 @@ def test_job_persistence_across_server_restart(server_process, test_db_path):
     server_process.wait(timeout=5)
     time.sleep(1)
 
-    # Start a new server process with the same database
+    # Start a new server process with the same database and port
     env = os.environ.copy()
     env["CI_DB_PATH"] = test_db_path
+    env["CI_SERVER_URL"] = server_url
 
     new_proc = subprocess.Popen(
-        ["python", "-m", "uvicorn", "ci_server.app:app", "--port", "8000"],
+        ["python", "-m", "uvicorn", "ci_server.app:app", "--port", port],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,

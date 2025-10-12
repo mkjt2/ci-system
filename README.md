@@ -103,8 +103,27 @@ pip install -e .
 
 **Run Tests:**
 ```bash
+# Run all tests with parallel execution (recommended, ~5x faster)
+pytest tests/ -v
+
+# Run tests sequentially (useful for debugging)
+pytest tests/ -v -n 0
+
+# Run only unit tests
+pytest tests/unit/ -v
+
+# Run only end-to-end tests
 pytest tests/e2e/ -v
 ```
+
+**Test Parallelization:**
+
+Tests are configured to run in parallel using pytest-xdist with 6 workers (configured in `pytest.ini`). This conservative approach (roughly half of typical CPU cores) prevents system overload while still providing significant speedup.
+
+Each worker runs tests independently with isolated server ports (8001, 8002, etc.) and separate SQLite databases to prevent conflicts. To adjust for your system:
+- More cores: Change `-n 6` to `-n 8` or `-n auto` in `pytest.ini`
+- Fewer cores: Change to `-n 4` or `-n 2`
+- Debug mode: Use `-n 0` for sequential execution
 
 ## Architecture
 

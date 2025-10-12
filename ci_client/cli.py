@@ -1,10 +1,24 @@
 import argparse
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
 
 from .client import list_jobs, submit_tests_async, submit_tests_streaming, wait_for_job
+
+
+def get_server_url() -> str:
+    """
+    Get the CI server URL from environment variable or use default.
+
+    Returns:
+        Server URL string
+
+    Environment variables:
+    - CI_SERVER_URL: Custom server URL (useful for testing with different ports)
+    """
+    return os.environ.get("CI_SERVER_URL", "http://localhost:8000")
 
 
 def main():
@@ -49,11 +63,14 @@ def main():
 
     args = parser.parse_args()
 
+    # Get server URL from environment
+    server_url = get_server_url()
+
     if args.command == "submit" and args.job_type == "test":
         if args.async_mode:
             # Async mode: submit and return job ID immediately
             try:
-                job_id = submit_tests_async(Path.cwd())
+                job_id = submit_tests_async(Path.cwd(), server_url=server_url)
                 print(f"Job submitted: {job_id}")
                 sys.exit(0)
             except Exception as e:
@@ -63,7 +80,7 @@ def main():
             # Sync mode: submit and wait for completion (original behavior)
             try:
                 success = False
-                for event in submit_tests_streaming(Path.cwd()):
+                for event in submit_tests_streaming(Path.cwd(), server_url=server_url):
                     if event["type"] == "job_id":
                         # Print job ID so user can reconnect from another terminal
                         print(f"Job ID: {event['job_id']}", file=sys.stderr)
@@ -86,7 +103,9 @@ def main():
         # Wait for a job and stream logs
         try:
             success = False
-            for event in wait_for_job(args.job_id, from_beginning=args.from_beginning):
+            for event in wait_for_job(
+                args.job_id, from_beginning=args.from_beginning, server_url=server_url
+            ):
                 if event["type"] == "log":
                     print(event["data"], end="", flush=True)
                 elif event["type"] == "complete":
@@ -103,7 +122,7 @@ def main():
     elif args.command == "list":
         # List all jobs
         try:
-            jobs = list_jobs()
+            jobs = list_jobs(server_url=server_url)
 
             if args.json_mode:
                 # JSON output mode
