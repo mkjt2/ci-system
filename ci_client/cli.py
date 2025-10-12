@@ -23,11 +23,17 @@ def main():
         help="Submit job asynchronously and return job ID immediately",
     )
 
-    # ci wait <job_id>
+    # ci wait <job_id> [--all]
     wait_parser = subparsers.add_parser(
         "wait", help="Wait for a job to complete and stream logs"
     )
     wait_parser.add_argument("job_id", help="Job ID to wait for")
+    wait_parser.add_argument(
+        "--all",
+        dest="from_beginning",
+        action="store_true",
+        help="Show all logs from beginning (default: only show new logs)",
+    )
 
     args = parser.parse_args()
 
@@ -68,7 +74,7 @@ def main():
         # Wait for a job and stream logs
         try:
             success = False
-            for event in wait_for_job(args.job_id):
+            for event in wait_for_job(args.job_id, from_beginning=args.from_beginning):
                 if event["type"] == "log":
                     print(event["data"], end="", flush=True)
                 elif event["type"] == "complete":

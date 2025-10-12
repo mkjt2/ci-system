@@ -71,7 +71,7 @@ def test_ci_submit_async_mode(server_process):
 
 
 def test_ci_wait_for_job(server_process):
-    """Test that 'ci wait <job_id>' streams logs and returns correct exit code."""
+    """Test that 'ci wait <job_id> --all' streams all logs and returns correct exit code."""
     # First submit a job asynchronously
     submit_result = run_ci_test("dummy_project", "submit", "test", "--async")
     assert submit_result.returncode == 0
@@ -81,7 +81,8 @@ def test_ci_wait_for_job(server_process):
 
     # Wait for the job to complete
     time.sleep(2)  # Give job time to start/complete
-    wait_result = run_ci_test("dummy_project", "wait", job_id)
+    # Use --all to see all logs from beginning
+    wait_result = run_ci_test("dummy_project", "wait", job_id, "--all")
     output = wait_result.stdout + wait_result.stderr
     assert wait_result.returncode == 0
     assert "test_add" in output
@@ -90,7 +91,7 @@ def test_ci_wait_for_job(server_process):
 
 
 def test_ci_wait_for_failing_job(server_process):
-    """Test that 'ci wait <job_id>' returns exit code 1 for failing tests."""
+    """Test that 'ci wait <job_id> --all' returns exit code 1 for failing tests."""
     # Submit a job with failing tests
     submit_result = run_ci_test("failing_project", "submit", "test", "--async")
     assert submit_result.returncode == 0
@@ -100,7 +101,8 @@ def test_ci_wait_for_failing_job(server_process):
 
     # Wait for the job to complete
     time.sleep(2)
-    wait_result = run_ci_test("failing_project", "wait", job_id)
+    # Use --all to see all logs
+    wait_result = run_ci_test("failing_project", "wait", job_id, "--all")
     output = wait_result.stdout + wait_result.stderr
     assert wait_result.returncode == 1
     assert "test_multiply" in output or "test_divide" in output
@@ -163,7 +165,7 @@ def test_ci_wait_keyboard_interrupt(server_process):
     # Start waiting for the job
     project = Path(__file__).parent.parent / "fixtures" / "dummy_project"
     proc = subprocess.Popen(
-        ["ci", "wait", job_id],
+        ["ci", "wait", job_id, "--all"],  # Use --all to see logs
         cwd=str(project),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -191,3 +193,29 @@ def test_ci_wait_keyboard_interrupt(server_process):
     # Should NOT have Python stack trace
     assert "Traceback" not in output
     assert "KeyboardInterrupt" not in output
+
+
+def test_ci_wait_forward_only(server_process):
+    """Test that 'ci wait <job_id>' (without --all) only shows new logs."""
+    # First submit a job asynchronously
+    submit_result = run_ci_test("dummy_project", "submit", "test", "--async")
+    assert submit_result.returncode == 0
+    match = re.search(r"Job submitted: ([a-f0-9\-]{36})", submit_result.stdout)
+    assert match is not None
+    job_id = match.group(1)
+
+    # Wait for the job to complete
+    time.sleep(5)  # Increased from 3 to ensure job completes
+
+    # Wait WITHOUT --all (should only see "Job already completed" message)
+    wait_result = run_ci_test("dummy_project", "wait", job_id)
+    output = wait_result.stdout + wait_result.stderr
+
+    # Should complete successfully
+    assert wait_result.returncode == 0
+
+    # Should see "already completed" message (not full test output)
+    assert "already completed" in output.lower()
+
+    # Should NOT see the full test output since we joined after completion
+    # (This is the key difference from --all)

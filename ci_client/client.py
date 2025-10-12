@@ -107,7 +107,7 @@ def submit_tests_async(
 
 
 def wait_for_job(
-    job_id: str, server_url: str = "http://localhost:8000"
+    job_id: str, server_url: str = "http://localhost:8000", from_beginning: bool = False
 ) -> Generator[dict, None, None]:
     """
     Wait for a job to complete and stream its output via Server-Sent Events.
@@ -115,18 +115,24 @@ def wait_for_job(
     Args:
         job_id: UUID of the job to wait for
         server_url: Base URL of the CI server
+        from_beginning: If True, streams all logs from the beginning.
+                       If False (default), only streams new logs from current position.
 
     Yields:
         dict: Event dictionaries with 'type' and other fields:
             - {"type": "log", "data": str} - Log output from test execution
             - {"type": "complete", "success": bool} - Final completion status
 
-    This function streams all logs from the beginning (supports reconnection).
-    If the job is still running, it will wait for new events to arrive.
+    By default, only streams new logs (forward-looking). This is useful for
+    monitoring a running job from another terminal without seeing all history.
+    Use from_beginning=True to replay all logs from the start.
     """
     try:
+        # Only add param if True (FastAPI will use default False if not present)
+        params = {"from_beginning": from_beginning} if from_beginning else {}
         response = requests.get(
             f"{server_url}/jobs/{job_id}/stream",
+            params=params,
             stream=True,
             timeout=300,
         )

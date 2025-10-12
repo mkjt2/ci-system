@@ -132,12 +132,16 @@ async def submit_job_async(file: UploadFile = File(...)) -> Dict[str, str]:
 
 
 @app.get("/jobs/{job_id}/stream")
-async def stream_job_logs(job_id: str) -> StreamingResponse:
+async def stream_job_logs(
+    job_id: str, from_beginning: bool = False
+) -> StreamingResponse:
     """
     Stream logs for a job via Server-Sent Events (SSE).
 
     Args:
         job_id: UUID of the job to stream logs for
+        from_beginning: If True, streams all past events first. If False (default),
+                       only streams new events from current position forward.
 
     Returns:
         StreamingResponse with SSE format events
@@ -145,9 +149,9 @@ async def stream_job_logs(job_id: str) -> StreamingResponse:
     Raises:
         HTTPException: 404 if job_id not found
 
-    This endpoint supports reconnection - it always streams all events
-    from the beginning. If the job is still running when we catch up,
-    it continues to wait for and stream new events as they arrive.
+    By default (from_beginning=False), only streams new events. This is useful
+    for monitoring a running job from another terminal without seeing all history.
+    With from_beginning=True, replays all events from the start.
     """
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -155,14 +159,29 @@ async def stream_job_logs(job_id: str) -> StreamingResponse:
     job = jobs[job_id]
 
     async def event_generator() -> AsyncGenerator[str, None]:
-        # First, stream all existing events (allows reconnection/replay)
-        for event in job["events"]:
-            yield f"data: {json.dumps(event)}\n\n"
-            await asyncio.sleep(0.01)  # Small delay to avoid overwhelming client
+        # Check if job is already completed when starting
+        if job["status"] == "completed" and not from_beginning:
+            # Job already completed and we're not showing history
+            # Just send a status message and complete event
+            yield f"data: {json.dumps({'type': 'log', 'data': 'Job already completed.\\n'})}\n\n"
+            # Still send the complete event with final status
+            if job["events"] and job["events"][-1]["type"] == "complete":
+                yield f"data: {json.dumps(job['events'][-1])}\n\n"
+            return
+
+        # Determine starting position
+        if from_beginning:
+            # Stream all existing events (replay from beginning)
+            for event in job["events"]:
+                yield f"data: {json.dumps(event)}\n\n"
+                await asyncio.sleep(0.01)  # Small delay to avoid overwhelming client
+            last_index = len(job["events"])
+        else:
+            # Start from current position (only new events)
+            last_index = len(job["events"])
 
         # If job is still running, continue polling for new events
         if job["status"] == "running":
-            last_index = len(job["events"])
             while job["status"] == "running":
                 await asyncio.sleep(0.1)  # Poll interval
                 # Stream any new events that have arrived
