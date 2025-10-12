@@ -5,7 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Claude Code Instructions
 
 - Rerun unit / end to end tests often after every significant code change.
-- New features and functionality changes should be developed using TDD.
+- New features and functionality changes MUST be developed using TDD.
+- Tests should not be flaky. Avoid techniques that can introduce flakiness if possible.
 - Ensure code is well structured, modular, and adheres to best practices.
 - Remember to use assertions to verify key invariants.
 - Write clear, concise code.

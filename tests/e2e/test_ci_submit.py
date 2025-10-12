@@ -118,7 +118,7 @@ def test_ci_wait_nonexistent_job(server_process):
 
 
 def test_ci_submit_keyboard_interrupt(server_process):
-    """Test that 'ci submit test' handles Ctrl-C gracefully."""
+    """Test that 'ci submit test' cancels the job on Ctrl-C."""
     project = Path(__file__).parent.parent / "fixtures" / "dummy_project"
     proc = subprocess.Popen(
         ["ci", "submit", "test"],
@@ -141,13 +141,14 @@ def test_ci_submit_keyboard_interrupt(server_process):
     # Should exit with code 130 (SIGINT)
     assert proc.returncode == 130
 
-    # Should have friendly error message
-    assert "interrupted by user" in output.lower()
-    assert "server may still be processing" in output.lower()
+    # Should have friendly cancellation message
+    assert "cancelled" in output.lower()
 
     # Should NOT have Python stack trace
     assert "Traceback" not in output
     assert "KeyboardInterrupt" not in output
+
+    # TODO: Verify job was actually cancelled on server (would need job tracking)
 
 
 def test_ci_wait_keyboard_interrupt(server_process):

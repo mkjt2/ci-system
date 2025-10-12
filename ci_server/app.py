@@ -2,7 +2,7 @@ import json
 import uuid
 import asyncio
 from typing import Dict, List, Any, Optional, AsyncGenerator
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from .executor import run_tests_in_docker, run_tests_in_docker_streaming
 
@@ -50,13 +50,29 @@ async def submit_job(file: UploadFile = File(...)):
 
 
 @app.post("/submit-stream")
-async def submit_job_stream(file: UploadFile = File(...)):
-    """Run tests in Docker, stream results in real-time via SSE."""
+async def submit_job_stream(request: Request, file: UploadFile = File(...)):
+    """
+    Run tests in Docker, stream results in real-time via SSE.
+
+    Cancels the job if client disconnects (Ctrl-C).
+    """
     zip_data = await file.read()
 
     async def event_generator():
-        async for event in run_tests_in_docker_streaming(zip_data):
-            yield f"data: {json.dumps(event)}\n\n"
+        # Create async generator task
+        gen = run_tests_in_docker_streaming(zip_data)
+
+        try:
+            async for event in gen:
+                # Check if client has disconnected before yielding
+                if await request.is_disconnected():
+                    # Close the generator to trigger cleanup/cancellation
+                    await gen.aclose()
+                    return
+                yield f"data: {json.dumps(event)}\n\n"
+        finally:
+            # Ensure generator is closed on any exit
+            await gen.aclose()
 
     return StreamingResponse(
         event_generator(),

@@ -52,11 +52,7 @@ def main():
                         success = event["success"]
                 sys.exit(0 if success else 1)
             except KeyboardInterrupt:
-                print("\n\nJob submission interrupted by user.", file=sys.stderr)
-                print(
-                    "Note: The server may still be processing the job.",
-                    file=sys.stderr,
-                )
+                print("\n\nJob cancelled by user.", file=sys.stderr)
                 sys.exit(130)  # Standard exit code for SIGINT
 
     elif args.command == "wait":
