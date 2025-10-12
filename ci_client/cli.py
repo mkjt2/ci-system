@@ -10,13 +10,23 @@ def main():
     subparsers = parser.add_subparsers(dest="command")
 
     # ci submit test [--async]
-    submit_parser = subparsers.add_parser("submit", help="Submit a job to the CI system")
-    submit_parser.add_argument("job_type", choices=["test"], help="Type of job to submit")
-    submit_parser.add_argument("--async", dest="async_mode", action="store_true",
-                               help="Submit job asynchronously and return job ID immediately")
+    submit_parser = subparsers.add_parser(
+        "submit", help="Submit a job to the CI system"
+    )
+    submit_parser.add_argument(
+        "job_type", choices=["test"], help="Type of job to submit"
+    )
+    submit_parser.add_argument(
+        "--async",
+        dest="async_mode",
+        action="store_true",
+        help="Submit job asynchronously and return job ID immediately",
+    )
 
     # ci wait <job_id>
-    wait_parser = subparsers.add_parser("wait", help="Wait for a job to complete and stream logs")
+    wait_parser = subparsers.add_parser(
+        "wait", help="Wait for a job to complete and stream logs"
+    )
     wait_parser.add_argument("job_id", help="Job ID to wait for")
 
     args = parser.parse_args()

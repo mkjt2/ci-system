@@ -9,19 +9,29 @@ import requests
 def create_project_zip(project_dir: Path) -> bytes:
     """Create a zip file of the project directory."""
     zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for path in project_dir.rglob('*'):
-            if path.is_file() and not any(p.startswith('.') or p == '__pycache__' for p in path.parts):
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in project_dir.rglob("*"):
+            if path.is_file() and not any(
+                p.startswith(".") or p == "__pycache__" for p in path.parts
+            ):
                 zf.write(path, path.relative_to(project_dir))
     return zip_buffer.getvalue()
 
 
-def submit_tests(project_dir: Path, server_url: str = "http://localhost:8000") -> tuple[bool, str]:
+def submit_tests(
+    project_dir: Path, server_url: str = "http://localhost:8000"
+) -> tuple[bool, str]:
     """Submit tests to the CI server (non-streaming, for backward compatibility)."""
     try:
         response = requests.post(
             f"{server_url}/submit",
-            files={"file": ("project.zip", create_project_zip(project_dir), "application/zip")},
+            files={
+                "file": (
+                    "project.zip",
+                    create_project_zip(project_dir),
+                    "application/zip",
+                )
+            },
             timeout=300,
         )
         response.raise_for_status()
@@ -31,12 +41,20 @@ def submit_tests(project_dir: Path, server_url: str = "http://localhost:8000") -
         return False, f"Error submitting to CI server: {e}\n"
 
 
-def submit_tests_streaming(project_dir: Path, server_url: str = "http://localhost:8000") -> Generator[dict, None, None]:
+def submit_tests_streaming(
+    project_dir: Path, server_url: str = "http://localhost:8000"
+) -> Generator[dict, None, None]:
     """Submit tests to the CI server with streaming output via SSE."""
     try:
         response = requests.post(
             f"{server_url}/submit-stream",
-            files={"file": ("project.zip", create_project_zip(project_dir), "application/zip")},
+            files={
+                "file": (
+                    "project.zip",
+                    create_project_zip(project_dir),
+                    "application/zip",
+                )
+            },
             stream=True,
             timeout=300,
         )
@@ -50,7 +68,9 @@ def submit_tests_streaming(project_dir: Path, server_url: str = "http://localhos
         yield {"type": "complete", "success": False}
 
 
-def submit_tests_async(project_dir: Path, server_url: str = "http://localhost:8000") -> str:
+def submit_tests_async(
+    project_dir: Path, server_url: str = "http://localhost:8000"
+) -> str:
     """
     Submit tests to the CI server asynchronously and return job ID immediately.
 
@@ -70,7 +90,13 @@ def submit_tests_async(project_dir: Path, server_url: str = "http://localhost:80
     try:
         response = requests.post(
             f"{server_url}/submit-async",
-            files={"file": ("project.zip", create_project_zip(project_dir), "application/zip")},
+            files={
+                "file": (
+                    "project.zip",
+                    create_project_zip(project_dir),
+                    "application/zip",
+                )
+            },
             timeout=30,
         )
         response.raise_for_status()
@@ -80,7 +106,9 @@ def submit_tests_async(project_dir: Path, server_url: str = "http://localhost:80
         raise RuntimeError(f"Error submitting to CI server: {e}")
 
 
-def wait_for_job(job_id: str, server_url: str = "http://localhost:8000") -> Generator[dict, None, None]:
+def wait_for_job(
+    job_id: str, server_url: str = "http://localhost:8000"
+) -> Generator[dict, None, None]:
     """
     Wait for a job to complete and stream its output via Server-Sent Events.
 
