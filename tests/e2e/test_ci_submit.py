@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import pytest
+import requests
 
 # Generate a unique prefix for this test session to avoid inter-run container conflicts
 # This is shared across all workers in a single pytest run
@@ -32,6 +33,53 @@ def worker_id(request):
     if hasattr(request.config, "workerinput"):
         return request.config.workerinput["workerid"]
     return "master"
+
+
+def wait_for_server_ready(proc, port, max_wait=10):
+    """
+    Wait for server to be ready and handle startup failures.
+
+    Args:
+        proc: subprocess.Popen instance of the server
+        port: Port number the server should be listening on
+        max_wait: Maximum seconds to wait
+
+    Raises:
+        RuntimeError: If server crashes or doesn't become ready
+    """
+    wait_interval = 0.2
+
+    for _ in range(int(max_wait / wait_interval)):
+        # Check if server crashed
+        if proc.poll() is not None:
+            # Server crashed, get stderr
+            _, stderr = proc.communicate()
+            raise RuntimeError(
+                f"Server crashed during startup on port {port}. "
+                f"stderr: {stderr.decode()}"
+            )
+
+        # Try to connect
+        try:
+            response = requests.get(f"http://localhost:{port}/jobs", timeout=1)
+            if response.status_code == 200:
+                return  # Server is ready
+        except requests.exceptions.RequestException:
+            pass
+
+        time.sleep(wait_interval)
+
+    # Server didn't become ready in time
+    proc.terminate()
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+    raise RuntimeError(
+        f"Server on port {port} did not become ready within {max_wait} seconds"
+    )
 
 
 @pytest.fixture
@@ -69,7 +117,9 @@ def server_process(test_db_path, worker_id, monkeypatch):
         stderr=subprocess.PIPE,
         env=env,
     )
-    time.sleep(2)
+
+    # Wait for server to be ready (with health check)
+    wait_for_server_ready(proc, port)
 
     try:
         yield proc
@@ -453,7 +503,9 @@ def test_job_persistence_across_server_restart(server_process, test_db_path):
         stderr=subprocess.PIPE,
         env=env,
     )
-    time.sleep(2)
+
+    # Wait for server to be ready
+    wait_for_server_ready(new_proc, int(port))
 
     try:
         # Verify job still exists after restart
