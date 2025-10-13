@@ -57,7 +57,8 @@ class SQLiteJobRepository(JobRepository):
                 status TEXT NOT NULL,
                 success INTEGER,
                 start_time TEXT,
-                end_time TEXT
+                end_time TEXT,
+                container_id TEXT
             )
         """)
 
@@ -99,8 +100,8 @@ class SQLiteJobRepository(JobRepository):
 
         await conn.execute(
             """
-            INSERT INTO jobs (id, status, success, start_time, end_time)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO jobs (id, status, success, start_time, end_time, container_id)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 job.id,
@@ -108,6 +109,7 @@ class SQLiteJobRepository(JobRepository):
                 job.success,
                 job.start_time.isoformat() if job.start_time else None,
                 job.end_time.isoformat() if job.end_time else None,
+                job.container_id,
             ),
         )
         await conn.commit()
@@ -126,7 +128,7 @@ class SQLiteJobRepository(JobRepository):
 
         # Get job metadata
         cursor = await conn.execute(
-            "SELECT id, status, success, start_time, end_time FROM jobs WHERE id = ?",
+            "SELECT id, status, success, start_time, end_time, container_id FROM jobs WHERE id = ?",
             (job_id,),
         )
         row = await cursor.fetchone()
@@ -135,7 +137,7 @@ class SQLiteJobRepository(JobRepository):
             return None
 
         # Parse job data
-        job_id, status, success, start_time_str, end_time_str = row
+        job_id, status, success, start_time_str, end_time_str, container_id = row
         start_time = datetime.fromisoformat(start_time_str) if start_time_str else None
         end_time = datetime.fromisoformat(end_time_str) if end_time_str else None
 
@@ -148,33 +150,41 @@ class SQLiteJobRepository(JobRepository):
             success=bool(success) if success is not None else None,
             start_time=start_time,
             end_time=end_time,
+            container_id=container_id,
             events=events,
         )
 
     async def update_job_status(
-        self, job_id: str, status: str, start_time: datetime | None = None
+        self, job_id: str, status: str, start_time: datetime | None = None,
+        container_id: str | None = None
     ) -> None:
         """
-        Update a job's status and optionally its start time.
+        Update a job's status and optionally its start time and container ID.
 
         Args:
             job_id: UUID of the job to update
-            status: New status ("queued", "running", "completed")
+            status: New status ("queued", "running", "completed", "cancelled", "failed")
             start_time: Optional timestamp when job started running
+            container_id: Optional Docker container ID
         """
         conn = await self._get_connection()
 
-        if start_time:
-            await conn.execute(
-                "UPDATE jobs SET status = ?, start_time = ? WHERE id = ?",
-                (status, start_time.isoformat(), job_id),
-            )
-        else:
-            await conn.execute(
-                "UPDATE jobs SET status = ? WHERE id = ?",
-                (status, job_id),
-            )
+        # Build dynamic SQL based on what's being updated
+        updates = ["status = ?"]
+        params = [status]
 
+        if start_time is not None:
+            updates.append("start_time = ?")
+            params.append(start_time.isoformat())
+
+        if container_id is not None:
+            updates.append("container_id = ?")
+            params.append(container_id)
+
+        params.append(job_id)  # WHERE clause parameter
+
+        sql = f"UPDATE jobs SET {', '.join(updates)} WHERE id = ?"
+        await conn.execute(sql, params)
         await conn.commit()
 
     async def complete_job(
@@ -276,7 +286,7 @@ class SQLiteJobRepository(JobRepository):
 
         cursor = await conn.execute(
             """
-            SELECT id, status, success, start_time, end_time
+            SELECT id, status, success, start_time, end_time, container_id
             FROM jobs
             ORDER BY start_time DESC
             """
@@ -286,7 +296,7 @@ class SQLiteJobRepository(JobRepository):
 
         jobs = []
         for row in rows:
-            job_id, status, success, start_time_str, end_time_str = row
+            job_id, status, success, start_time_str, end_time_str, container_id = row
             jobs.append(
                 Job(
                     id=job_id,
@@ -298,6 +308,7 @@ class SQLiteJobRepository(JobRepository):
                     end_time=datetime.fromisoformat(end_time_str)
                     if end_time_str
                     else None,
+                    container_id=container_id,
                     events=[],  # Don't load events for listing efficiency
                 )
             )

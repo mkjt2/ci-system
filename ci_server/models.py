@@ -51,14 +51,16 @@ class Job:
     Represents a CI test job with its metadata and execution history.
 
     Jobs progress through states: queued -> running -> completed
+    Additional states: cancelled, failed
     """
 
     id: str
-    status: str  # "queued", "running", or "completed"
+    status: str  # "queued", "running", "completed", "cancelled", or "failed"
     events: list[JobEvent] = field(default_factory=list)
     success: bool | None = None
     start_time: datetime | None = None
     end_time: datetime | None = None
+    container_id: str | None = None  # Docker container ID for this job
 
     def to_dict(self) -> dict[str, Any]:
         """Convert job to dictionary format (for API responses)."""

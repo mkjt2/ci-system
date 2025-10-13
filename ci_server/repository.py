@@ -47,15 +47,17 @@ class JobRepository(ABC):
 
     @abstractmethod
     async def update_job_status(
-        self, job_id: str, status: str, start_time: datetime | None = None
+        self, job_id: str, status: str, start_time: datetime | None = None,
+        container_id: str | None = None
     ) -> None:
         """
-        Update a job's status and optionally its start time.
+        Update a job's status and optionally its start time and container ID.
 
         Args:
             job_id: UUID of the job to update
-            status: New status ("queued", "running", "completed")
+            status: New status ("queued", "running", "completed", "cancelled", "failed")
             start_time: Optional timestamp when job started running
+            container_id: Optional Docker container ID
 
         Raises:
             Exception: If job not found

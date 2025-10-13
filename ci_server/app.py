@@ -10,13 +10,16 @@ from typing import Any
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
+from .container_manager import ContainerManager
 from .executor import run_tests_in_docker_streaming
+from .job_controller import JobController
 from .models import Job, JobEvent
 from .repository import JobRepository
 from .sqlite_repository import SQLiteJobRepository
 
-# Global repository instance (initialized at startup)
+# Global instances (initialized at startup)
 repository: JobRepository | None = None
+job_controller: JobController | None = None
 
 
 def get_database_path() -> str:
