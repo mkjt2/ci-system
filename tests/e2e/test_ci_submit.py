@@ -9,6 +9,10 @@ from pathlib import Path
 
 import pytest
 
+# Generate a unique prefix for this test session to avoid inter-run container conflicts
+# This is shared across all workers in a single pytest run
+SESSION_ID = os.urandom(3).hex()  # 6-character hex string
+
 
 @pytest.fixture
 def test_db_path():
@@ -37,19 +41,27 @@ def server_process(test_db_path, worker_id, monkeypatch):
     # worker_id is 'master' when not running in parallel, or 'gw0', 'gw1', etc. when parallel
     if worker_id == "master":
         port = 8000
+        # Use session ID for container prefix even in single-worker mode
+        # This prevents inter-run conflicts with containers from previous test runs
+        container_prefix = f"{SESSION_ID}_"
     else:
         # Extract worker number from 'gw0', 'gw1', etc.
         worker_num = int(worker_id.replace("gw", ""))
         port = 8000 + worker_num + 1
+        # Use session ID + worker ID as container prefix to isolate Docker containers
+        # Format: {session_id}_{worker_id}_ (e.g., "a3b5f2_gw0_")
+        container_prefix = f"{SESSION_ID}_{worker_id}_"
 
     # Set environment variables for both server and client
     monkeypatch.setenv("CI_DB_PATH", test_db_path)
     monkeypatch.setenv("CI_SERVER_URL", f"http://localhost:{port}")
+    monkeypatch.setenv("CI_CONTAINER_PREFIX", container_prefix)
 
     # Start server with environment variables
     env = os.environ.copy()
     env["CI_DB_PATH"] = test_db_path
     env["CI_SERVER_URL"] = f"http://localhost:{port}"
+    env["CI_CONTAINER_PREFIX"] = container_prefix
 
     proc = subprocess.Popen(
         ["python", "-m", "uvicorn", "ci_server.app:app", "--port", str(port)],
@@ -58,9 +70,55 @@ def server_process(test_db_path, worker_id, monkeypatch):
         env=env,
     )
     time.sleep(2)
-    yield proc
-    proc.terminate()
-    proc.wait(timeout=5)
+
+    try:
+        yield proc
+    finally:
+        # Teardown: stop server and clean up containers (guaranteed to run)
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            # Best effort - kill if terminate fails
+            try:
+                proc.kill()
+                proc.wait(timeout=2)
+            except Exception:
+                pass
+
+        # Clean up all containers with this worker's prefix
+        # This ensures no containers are left behind after tests
+        try:
+            cleanup_result = subprocess.run(
+                [
+                    "docker",
+                    "ps",
+                    "-a",
+                    "--filter",
+                    "ancestor=python:3.12-slim",
+                    "--format",
+                    "{{.Names}}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+            if cleanup_result.returncode == 0 and cleanup_result.stdout.strip():
+                for container_name in cleanup_result.stdout.strip().split("\n"):
+                    if container_name and container_name.startswith(container_prefix):
+                        try:
+                            subprocess.run(
+                                ["docker", "rm", "-f", container_name],
+                                capture_output=True,
+                                timeout=10,
+                            )
+                        except Exception:
+                            # Best effort - continue cleaning up other containers
+                            pass
+        except Exception:
+            # Best effort - don't fail the test if cleanup fails
+            pass
 
 
 def run_ci_test(project_name, *args, env=None):
@@ -387,6 +445,7 @@ def test_job_persistence_across_server_restart(server_process, test_db_path):
     env = os.environ.copy()
     env["CI_DB_PATH"] = test_db_path
     env["CI_SERVER_URL"] = server_url
+    env["CI_CONTAINER_PREFIX"] = os.environ.get("CI_CONTAINER_PREFIX", "")
 
     new_proc = subprocess.Popen(
         ["python", "-m", "uvicorn", "ci_server.app:app", "--port", port],

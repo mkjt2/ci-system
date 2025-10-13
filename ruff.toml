@@ -15,13 +15,14 @@ select = [
 
 # Ignore specific rules
 ignore = [
-    "E501",  # Line too long (let formatter handle it)
-    "B904",  # Use 'raise ... from err' (sometimes not needed)
+    "E501",   # Line too long (let formatter handle it)
+    "B904",   # Use 'raise ... from err' (sometimes not needed)
+    "SIM105", # Use contextlib.suppress (prefer explicit try-except for clarity)
 ]
 
 # Exclude test fixtures (they are intentionally broken)
 exclude = [
-    "tests/fixtures",
+    "tests/fixtures/**",
 ]
 
 [lint.per-file-ignores]

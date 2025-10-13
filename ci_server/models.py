@@ -61,6 +61,7 @@ class Job:
     start_time: datetime | None = None
     end_time: datetime | None = None
     container_id: str | None = None  # Docker container ID for this job
+    zip_file_path: str | None = None  # Path to stashed zip file (for queued jobs)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert job to dictionary format (for API responses)."""

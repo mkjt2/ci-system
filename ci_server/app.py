@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import uuid
 from collections.abc import AsyncGenerator
@@ -16,6 +17,12 @@ from .job_controller import JobController
 from .models import Job, JobEvent
 from .repository import JobRepository
 from .sqlite_repository import SQLiteJobRepository
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 # Global instances (initialized at startup)
 repository: JobRepository | None = None
@@ -35,25 +42,50 @@ def get_database_path() -> str:
     return os.environ.get("CI_DB_PATH", "ci_jobs.db")
 
 
+def get_container_prefix() -> str:
+    """
+    Get the container name prefix from environment.
+
+    Returns:
+        Container name prefix for Docker isolation
+
+    Environment variables:
+    - CI_CONTAINER_PREFIX: Prefix for container names (useful for parallel testing)
+    """
+    return os.environ.get("CI_CONTAINER_PREFIX", "")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Lifespan context manager for FastAPI app.
 
     Handles startup and shutdown events:
-    - Startup: Initialize database and create tables
-    - Shutdown: Close database connections
+    - Startup: Initialize database, create tables, start job controller
+    - Shutdown: Stop job controller, close database connections
     """
-    global repository
+    global repository, job_controller
 
     # Startup: Initialize the repository with configured database path
     db_path = get_database_path()
     repository = SQLiteJobRepository(db_path)
     await repository.initialize()
 
+    # Initialize and start the job controller with container namespace isolation
+    container_prefix = get_container_prefix()
+    container_manager = ContainerManager(container_name_prefix=container_prefix)
+    job_controller = JobController(
+        repository=repository,
+        container_manager=container_manager,
+        reconcile_interval=2.0,
+    )
+    await job_controller.start()
+
     yield
 
-    # Shutdown: Close repository connections
+    # Shutdown: Stop controller and close repository connections
+    if job_controller:
+        await job_controller.stop()
     if repository:
         await repository.close()
 
@@ -74,6 +106,21 @@ def get_repository() -> JobRepository:
     if repository is None:
         raise RuntimeError("Repository not initialized")
     return repository
+
+
+def get_controller() -> JobController:
+    """
+    Get the global job controller instance.
+
+    Returns:
+        The initialized JobController
+
+    Raises:
+        RuntimeError: If controller is not initialized
+    """
+    if job_controller is None:
+        raise RuntimeError("Job controller not initialized")
+    return job_controller
 
 
 async def process_job_async(job_id: str, zip_data: bytes) -> None:
@@ -125,15 +172,19 @@ async def stream_job_events(
     """
     Helper function to stream job events as SSE.
 
+    Streams logs directly from Docker container in real-time.
+
     Args:
         job_id: UUID of the job to stream
         request: Optional FastAPI request to check for client disconnection
-        from_beginning: If True, stream all events. If False, only stream new events.
+        from_beginning: If True, stream all logs. If False, only stream new logs.
 
     Yields:
         SSE-formatted event strings
     """
     repo = get_repository()
+    controller = get_controller()
+
     job = await repo.get_job(job_id)
 
     if job is None:
@@ -141,49 +192,83 @@ async def stream_job_events(
         yield f"data: {json.dumps({'type': 'complete', 'success': False})}\n\n"
         return
 
-    # Check if job is already completed when starting
-    if job.status == "completed" and not from_beginning:
-        # Job already completed and we're not showing history
-        yield f"data: {json.dumps({'type': 'log', 'data': 'Job already completed.\\n'})}\n\n"
-        # Still send the complete event with final status
-        if job.events and job.events[-1].type == "complete":
-            yield f"data: {json.dumps(job.events[-1].to_dict())}\n\n"
+    # Wait for job to start running (with timeout)
+    max_wait = 30  # 30 seconds timeout
+    waited = 0
+    while job.status == "queued" and waited < max_wait:
+        await asyncio.sleep(0.5)
+        waited += 0.5
+        job = await repo.get_job(job_id)
+        if job is None:
+            yield f"data: {json.dumps({'type': 'log', 'data': 'Job disappeared.\\n'})}\n\n"
+            yield f"data: {json.dumps({'type': 'complete', 'success': False})}\n\n"
+            return
+
+    # Check if job is in a terminal state
+    if job.status in ["completed", "failed", "cancelled"]:
+        # If not requesting from beginning, just notify that job is done
+        # (forward-only mode: only show events from when you join, no historical logs)
+        if not from_beginning:
+            yield f"data: {json.dumps({'type': 'log', 'data': 'Job already completed.\\n'})}\n\n"
+            success = job.success if job.success is not None else False
+            yield f"data: {json.dumps({'type': 'complete', 'success': success})}\n\n"
+            return
+
+        # Otherwise stream all logs from completed container (when --all is used)
+        if job.container_id:
+            try:
+                async for log_line in controller.container_manager.stream_logs(
+                    job.container_id, follow=False
+                ):
+                    yield f"data: {json.dumps({'type': 'log', 'data': log_line})}\n\n"
+
+                    # Check if client disconnected
+                    if request and await request.is_disconnected():
+                        return
+            except Exception:
+                # Container might be gone, that's ok
+                pass
+
+        # Send completion event with final status
+        success = job.success if job.success is not None else False
+        yield f"data: {json.dumps({'type': 'complete', 'success': success})}\n\n"
         return
 
-    # Determine starting position
-    if from_beginning:
-        # Stream all existing events (replay from beginning)
-        for event in job.events:
-            yield f"data: {json.dumps(event.to_dict())}\n\n"
-            await asyncio.sleep(0.01)  # Small delay to avoid overwhelming client
-        last_index = len(job.events)
+    # Job is running - stream logs from Docker
+    if job.status == "running" and job.container_id:
+        try:
+            # Stream logs directly from Docker (with --follow for real-time)
+            async for log_line in controller.container_manager.stream_logs(
+                job.container_id, follow=True
+            ):
+                yield f"data: {json.dumps({'type': 'log', 'data': log_line})}\n\n"
+
+                # Check if client disconnected
+                if request and await request.is_disconnected():
+                    return
+
+                # Periodically check if job completed
+                # (Docker logs stream will end when container exits)
+        except Exception as e:
+            # Log streaming failed
+            yield f"data: {json.dumps({'type': 'log', 'data': f'Error streaming logs: {e}\\n'})}\n\n"
+
+    # Job finished, wait for reconciliation loop to finalize it
+    # (The reconciliation loop sets the success field based on container exit code)
+    max_wait = 5  # 5 seconds max wait for finalization
+    waited = 0
+    final_job = await repo.get_job(job_id)
+    while final_job and final_job.success is None and waited < max_wait:
+        await asyncio.sleep(0.1)
+        waited += 0.1
+        final_job = await repo.get_job(job_id)
+
+    if final_job:
+        success = final_job.success if final_job.success is not None else False
+        yield f"data: {json.dumps({'type': 'complete', 'success': success})}\n\n"
     else:
-        # Start from current position (only new events)
-        last_index = len(job.events)
-
-    # If job is still running, continue polling for new events
-    if job.status == "running" or job.status == "queued":
-        while True:
-            # Re-fetch job to get latest status
-            current_job = await repo.get_job(job_id)
-            if current_job is None:
-                break
-
-            # Get new events since last check
-            new_events = await repo.get_events(job_id, from_index=last_index)
-            for event in new_events:
-                yield f"data: {json.dumps(event.to_dict())}\n\n"
-                last_index += 1
-
-            # Check if job completed
-            if current_job.status == "completed":
-                break
-
-            # Check if client has disconnected (if request provided)
-            if request and await request.is_disconnected():
-                return
-
-            await asyncio.sleep(0.1)  # Poll interval
+        # Job disappeared
+        yield f"data: {json.dumps({'type': 'complete', 'success': False})}\n\n"
 
 
 @app.post("/submit")
@@ -191,24 +276,34 @@ async def submit_job(request: Request, file: UploadFile = File(...)):
     """
     Run tests in Docker, stream results in real-time via SSE.
 
-    This is a unified implementation that creates a job, processes it in the
-    background, and streams the results. This reduces code duplication by
-    reusing the async job processing infrastructure.
+    Uses controller pattern: stashes the zip file, creates a queued job,
+    and the controller's reconciliation loop handles container creation
+    and execution.
     """
+    import tempfile
+
     job_id = str(uuid.uuid4())
     zip_data = await file.read()
     repo = get_repository()
 
-    # Create job entry in the database
+    # Stash the zip file to a temporary location
+    fd, zip_file_path = tempfile.mkstemp(suffix=".zip", prefix=f"ci_job_{job_id}_")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(zip_data)
+    except Exception:
+        os.close(fd)
+        raise
+
+    # Create job entry in the database with zip file path
     job = Job(
         id=job_id,
         status="queued",
+        zip_file_path=zip_file_path,
     )
     await repo.create_job(job)
 
-    # Start job processing in background (fire-and-forget)
-    asyncio.create_task(process_job_async(job_id, zip_data))
-
+    # Controller will pick up the queued job and start it
     # Stream the results as they become available
     return StreamingResponse(
         stream_job_events(job_id, request, from_beginning=True),
@@ -223,22 +318,30 @@ async def submit_job_stream(request: Request, file: UploadFile = File(...)):
     Run tests in Docker, stream results in real-time via SSE.
 
     Creates a job ID and tracks the job so users can reconnect with 'ci wait'.
-    First sends the job ID, then streams all events. This is now unified with
-    /submit endpoint but additionally sends the job_id event first.
+    First sends the job ID, then streams all events. Uses controller pattern.
     """
+    import tempfile
+
     job_id = str(uuid.uuid4())
     zip_data = await file.read()
     repo = get_repository()
 
-    # Create job entry in the database
+    # Stash the zip file to a temporary location
+    fd, zip_file_path = tempfile.mkstemp(suffix=".zip", prefix=f"ci_job_{job_id}_")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(zip_data)
+    except Exception:
+        os.close(fd)
+        raise
+
+    # Create job entry in the database with zip file path
     job = Job(
         id=job_id,
         status="queued",
+        zip_file_path=zip_file_path,
     )
     await repo.create_job(job)
-
-    # Start job processing in background (fire-and-forget)
-    asyncio.create_task(process_job_async(job_id, zip_data))
 
     async def event_generator():
         # First, send the job ID so client can print it
@@ -248,6 +351,7 @@ async def submit_job_stream(request: Request, file: UploadFile = File(...)):
         async for event in stream_job_events(job_id, request, from_beginning=True):
             yield event
 
+    # Controller will pick up the queued job and start it
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
@@ -266,23 +370,33 @@ async def submit_job_async(file: UploadFile = File(...)) -> dict[str, str]:
     Returns:
         Dictionary with job_id that can be used to query job status
 
-    This endpoint is non-blocking - it creates a job entry and starts
-    processing in the background, then immediately returns the job ID.
+    Uses controller pattern: stashes zip file, creates queued job, and
+    returns immediately. Controller handles execution in background.
     """
+    import tempfile
+
     job_id = str(uuid.uuid4())
     zip_data = await file.read()
     repo = get_repository()
 
-    # Create job entry in the database
+    # Stash the zip file to a temporary location
+    fd, zip_file_path = tempfile.mkstemp(suffix=".zip", prefix=f"ci_job_{job_id}_")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(zip_data)
+    except Exception:
+        os.close(fd)
+        raise
+
+    # Create job entry in the database with zip file path
     job = Job(
         id=job_id,
         status="queued",
+        zip_file_path=zip_file_path,
     )
     await repo.create_job(job)
 
-    # Start job processing in background (fire-and-forget)
-    asyncio.create_task(process_job_async(job_id, zip_data))
-
+    # Controller will pick up the queued job and start it
     return {"job_id": job_id}
 
 

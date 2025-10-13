@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .container_manager import ContainerInfo, ContainerManager
-from .models import Job, JobEvent
+from .models import Job
 from .repository import JobRepository
 
 # Configure logging
@@ -83,6 +83,7 @@ class JobController:
 
         # Clean up temporary directories
         import shutil
+
         for job_id, temp_dir in self.active_jobs.items():
             logger.info(f"Cleaning up temp directory for job {job_id}")
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -112,19 +113,24 @@ class JobController:
         try:
             # 1. Get desired state from database
             jobs = await self.repository.list_jobs()
+            logger.debug(f"Reconciliation: Found {len(jobs)} jobs in database")
 
             # 2. Get actual state from Docker
             containers = await self.container_manager.list_ci_containers()
             container_map = {c.name: c for c in containers}
+            logger.debug(
+                f"Reconciliation: Found {len(containers)} containers in Docker"
+            )
 
             # 3. Reconcile each job
             for job in jobs:
                 try:
+                    logger.debug(
+                        f"Reconciling job {job.id} (status={job.status}, container_id={job.container_id}, zip_file_path={job.zip_file_path})"
+                    )
                     await self._reconcile_job(job, container_map.get(job.id))
                 except Exception as e:
-                    logger.error(
-                        f"Error reconciling job {job.id}: {e}", exc_info=True
-                    )
+                    logger.error(f"Error reconciling job {job.id}: {e}", exc_info=True)
 
             # 4. Clean up orphaned containers (containers without jobs)
             await self._cleanup_orphaned_containers(containers, jobs)
@@ -132,9 +138,7 @@ class JobController:
         except Exception as e:
             logger.error(f"Error in reconciliation cycle: {e}", exc_info=True)
 
-    async def _reconcile_job(
-        self, job: Job, container: ContainerInfo | None
-    ) -> None:
+    async def _reconcile_job(self, job: Job, container: ContainerInfo | None) -> None:
         """
         Reconcile a single job's state with its container state.
 
@@ -147,10 +151,8 @@ class JobController:
         # Handle jobs in "queued" state
         if job.status == "queued":
             if container is None:
-                # No container exists yet - this is expected
-                # Container will be created when we have the zip data
-                # (which is stored in active_jobs by submit endpoint)
-                if job_id in self.active_jobs:
+                # No container exists yet - start the job if we have zip file path
+                if job.zip_file_path:
                     await self._start_job(job_id)
             else:
                 # Container exists but shouldn't - clean it up
@@ -164,9 +166,7 @@ class JobController:
             if container is None:
                 # Container disappeared! Mark job as failed
                 logger.error(f"Container for running job {job_id} disappeared")
-                await self._mark_job_failed(
-                    job_id, "Container lost during execution"
-                )
+                await self._mark_job_failed(job_id, "Container lost during execution")
             elif container.status == "exited":
                 # Container finished, collect results
                 logger.info(f"Job {job_id} container exited, collecting results")
@@ -182,17 +182,18 @@ class JobController:
                 )
 
         # Handle jobs in "completed", "failed", or "cancelled" state
-        elif job.status in ["completed", "failed", "cancelled"]:
-            if container is not None:
-                # Clean up the container
-                logger.info(f"Cleaning up container for {job.status} job {job_id}")
-                await self.container_manager.cleanup_container(job_id)
+        elif (
+            job.status in ["completed", "failed", "cancelled"]
+            and job_id in self.active_jobs
+        ):
+            # Keep container around for log viewing - don't clean up immediately
+            # Containers will be cleaned up by explicit user action or periodic cleanup
 
             # Clean up temp directory if we still have it
-            if job_id in self.active_jobs:
-                temp_dir = self.active_jobs.pop(job_id)
-                import shutil
-                shutil.rmtree(temp_dir, ignore_errors=True)
+            temp_dir = self.active_jobs.pop(job_id)
+            import shutil
+
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     async def _start_job(self, job_id: str) -> None:
         """
@@ -201,19 +202,41 @@ class JobController:
         Args:
             job_id: Job identifier
         """
-        # Get zip data from active_jobs
-        if job_id not in self.active_jobs:
-            logger.warning(f"Cannot start job {job_id}: no zip data available")
-            return
-
-        temp_dir = self.active_jobs[job_id]
-
         try:
-            # Get the full job to access container_id if it was set
+            logger.info(f"_start_job called for job {job_id}")
+
+            # Get the full job to access zip_file_path
             job = await self.repository.get_job(job_id)
             if job is None:
                 logger.error(f"Job {job_id} not found in database")
                 return
+
+            # Validate zip_file_path is set and exists
+            if not job.zip_file_path:
+                logger.error(f"Job {job_id} has no zip file path")
+                await self._mark_job_failed(job_id, "No zip file path available")
+                return
+
+            zip_path = Path(job.zip_file_path)
+            if not zip_path.exists():
+                logger.error(
+                    f"Job {job_id} zip file does not exist: {job.zip_file_path}"
+                )
+                await self._mark_job_failed(
+                    job_id, f"Zip file not found: {job.zip_file_path}"
+                )
+                return
+
+            if not zip_path.is_file():
+                logger.error(
+                    f"Job {job_id} zip path is not a file: {job.zip_file_path}"
+                )
+                await self._mark_job_failed(
+                    job_id, f"Zip path is not a file: {job.zip_file_path}"
+                )
+                return
+
+            logger.info(f"Job {job_id} has valid zip_file_path: {job.zip_file_path}")
 
             # If container already exists (from a previous attempt), use it
             if job.container_id:
@@ -226,16 +249,31 @@ class JobController:
                     )
                     return
 
+            # Create container from zip file
+            logger.info(f"Creating container for job {job_id} from {job.zip_file_path}")
+            container_id, temp_dir = await self.container_manager.create_container(
+                job_id, job.zip_file_path
+            )
+
+            # Register the temp directory for lifecycle management
+            self.active_jobs[job_id] = temp_dir
+            logger.info(f"Registered temp directory for job {job_id}: {temp_dir}")
+
             # Start the container
-            logger.info(f"Starting container for job {job_id}")
-            await self.container_manager.start_container(job_id)
+            logger.info(f"Starting container {container_id} for job {job_id}")
+            await self.container_manager.start_container(container_id)
 
             # Update job status to running
             await self.repository.update_job_status(
-                job_id, "running", start_time=datetime.utcnow(), container_id=job_id
+                job_id,
+                "running",
+                start_time=datetime.utcnow(),
+                container_id=container_id,
             )
 
-            logger.info(f"Job {job_id} started successfully")
+            logger.info(
+                f"Job {job_id} started successfully with container {container_id}"
+            )
 
         except Exception as e:
             logger.error(f"Failed to start job {job_id}: {e}", exc_info=True)
@@ -248,30 +286,15 @@ class JobController:
         Args:
             job_id: Job identifier
             container: Container information
+
+        Note: Logs are NOT stored in the database. They are streamed directly
+        from Docker on-demand by SSE clients.
         """
         try:
-            # Get all logs from the container
-            logs = []
-            async for line in self.container_manager.stream_logs(
-                container.container_id, follow=False
-            ):
-                logs.append(line)
-                # Store log event
-                event = JobEvent(
-                    type="log", data=line, timestamp=datetime.utcnow()
-                )
-                await self.repository.add_event(job_id, event)
-
             # Determine success based on exit code
             success = container.exit_code == 0
 
-            # Store completion event
-            complete_event = JobEvent(
-                type="complete", success=success, timestamp=datetime.utcnow()
-            )
-            await self.repository.add_event(job_id, complete_event)
-
-            # Mark job as completed
+            # Mark job as completed (no log events stored)
             await self.repository.complete_job(
                 job_id, success=success, end_time=datetime.utcnow()
             )
@@ -306,21 +329,15 @@ class JobController:
         Args:
             job_id: Job identifier
             reason: Failure reason
+
+        Note: Error message is logged but NOT stored in database.
+        Clients will see the error in Docker logs if available.
         """
         try:
-            # Add error event
-            error_event = JobEvent(
-                type="log", data=f"Error: {reason}\n", timestamp=datetime.utcnow()
-            )
-            await self.repository.add_event(job_id, error_event)
+            # Log the error for debugging
+            logger.error(f"Job {job_id} failed: {reason}")
 
-            # Add completion event
-            complete_event = JobEvent(
-                type="complete", success=False, timestamp=datetime.utcnow()
-            )
-            await self.repository.add_event(job_id, complete_event)
-
-            # Update job status to failed
+            # Mark job as failed in database
             await self.repository.update_job_status(job_id, "failed")
             await self.repository.complete_job(
                 job_id, success=False, end_time=datetime.utcnow()
@@ -329,9 +346,7 @@ class JobController:
             logger.info(f"Job {job_id} marked as failed: {reason}")
 
         except Exception as e:
-            logger.error(
-                f"Error marking job {job_id} as failed: {e}", exc_info=True
-            )
+            logger.error(f"Error marking job {job_id} as failed: {e}", exc_info=True)
 
     async def _cleanup_orphaned_containers(
         self, containers: list[ContainerInfo], jobs: list[Job]

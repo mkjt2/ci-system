@@ -58,7 +58,8 @@ class SQLiteJobRepository(JobRepository):
                 success INTEGER,
                 start_time TEXT,
                 end_time TEXT,
-                container_id TEXT
+                container_id TEXT,
+                zip_file_path TEXT
             )
         """)
 
@@ -100,8 +101,8 @@ class SQLiteJobRepository(JobRepository):
 
         await conn.execute(
             """
-            INSERT INTO jobs (id, status, success, start_time, end_time, container_id)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO jobs (id, status, success, start_time, end_time, container_id, zip_file_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job.id,
@@ -110,6 +111,7 @@ class SQLiteJobRepository(JobRepository):
                 job.start_time.isoformat() if job.start_time else None,
                 job.end_time.isoformat() if job.end_time else None,
                 job.container_id,
+                job.zip_file_path,
             ),
         )
         await conn.commit()
@@ -128,7 +130,7 @@ class SQLiteJobRepository(JobRepository):
 
         # Get job metadata
         cursor = await conn.execute(
-            "SELECT id, status, success, start_time, end_time, container_id FROM jobs WHERE id = ?",
+            "SELECT id, status, success, start_time, end_time, container_id, zip_file_path FROM jobs WHERE id = ?",
             (job_id,),
         )
         row = await cursor.fetchone()
@@ -137,7 +139,15 @@ class SQLiteJobRepository(JobRepository):
             return None
 
         # Parse job data
-        job_id, status, success, start_time_str, end_time_str, container_id = row
+        (
+            job_id,
+            status,
+            success,
+            start_time_str,
+            end_time_str,
+            container_id,
+            zip_file_path,
+        ) = row
         start_time = datetime.fromisoformat(start_time_str) if start_time_str else None
         end_time = datetime.fromisoformat(end_time_str) if end_time_str else None
 
@@ -151,12 +161,16 @@ class SQLiteJobRepository(JobRepository):
             start_time=start_time,
             end_time=end_time,
             container_id=container_id,
+            zip_file_path=zip_file_path,
             events=events,
         )
 
     async def update_job_status(
-        self, job_id: str, status: str, start_time: datetime | None = None,
-        container_id: str | None = None
+        self,
+        job_id: str,
+        status: str,
+        start_time: datetime | None = None,
+        container_id: str | None = None,
     ) -> None:
         """
         Update a job's status and optionally its start time and container ID.
@@ -286,7 +300,7 @@ class SQLiteJobRepository(JobRepository):
 
         cursor = await conn.execute(
             """
-            SELECT id, status, success, start_time, end_time, container_id
+            SELECT id, status, success, start_time, end_time, container_id, zip_file_path
             FROM jobs
             ORDER BY start_time DESC
             """
@@ -296,7 +310,15 @@ class SQLiteJobRepository(JobRepository):
 
         jobs = []
         for row in rows:
-            job_id, status, success, start_time_str, end_time_str, container_id = row
+            (
+                job_id,
+                status,
+                success,
+                start_time_str,
+                end_time_str,
+                container_id,
+                zip_file_path,
+            ) = row
             jobs.append(
                 Job(
                     id=job_id,
@@ -309,6 +331,7 @@ class SQLiteJobRepository(JobRepository):
                     if end_time_str
                     else None,
                     container_id=container_id,
+                    zip_file_path=zip_file_path,
                     events=[],  # Don't load events for listing efficiency
                 )
             )

@@ -47,8 +47,11 @@ class JobRepository(ABC):
 
     @abstractmethod
     async def update_job_status(
-        self, job_id: str, status: str, start_time: datetime | None = None,
-        container_id: str | None = None
+        self,
+        job_id: str,
+        status: str,
+        start_time: datetime | None = None,
+        container_id: str | None = None,
     ) -> None:
         """
         Update a job's status and optionally its start time and container ID.

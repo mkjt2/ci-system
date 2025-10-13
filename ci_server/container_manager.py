@@ -28,7 +28,9 @@ class ContainerInfo:
 
     container_id: str
     name: str  # Job ID used as container name
-    status: Literal["created", "running", "exited", "paused", "restarting", "removing", "dead"]
+    status: Literal[
+        "created", "running", "exited", "paused", "restarting", "removing", "dead"
+    ]
     exit_code: int | None
     started_at: datetime | None
     finished_at: datetime | None
@@ -42,19 +44,39 @@ class ContainerManager:
     and cleaning up Docker containers that run pytest tests.
     """
 
-    def __init__(self):
-        """Initialize the container manager."""
+    def __init__(self, container_name_prefix: str = ""):
+        """
+        Initialize the container manager.
+
+        Args:
+            container_name_prefix: Optional prefix for container names.
+                                  Containers are named as "{prefix}{job_id}".
+                                  This enables parallel test execution without interference.
+        """
         self.image = "python:3.12-slim"
+        self.container_name_prefix = container_name_prefix
+
+    def _get_container_name(self, job_id: str) -> str:
+        """
+        Get the full container name with prefix.
+
+        Args:
+            job_id: Job identifier
+
+        Returns:
+            Full container name: "{prefix}{job_id}"
+        """
+        return f"{self.container_name_prefix}{job_id}"
 
     async def create_container(
-        self, job_id: str, zip_data: bytes
+        self, job_id: str, zip_file_path: str
     ) -> tuple[str, Path]:
         """
         Create a Docker container for running tests.
 
         Args:
             job_id: Unique job identifier (used as container name)
-            zip_data: Zipped project data to test
+            zip_file_path: Path to zipped project file
 
         Returns:
             Tuple of (container_id, temp_dir_path)
@@ -68,7 +90,10 @@ class ContainerManager:
         temp_path = Path(temp_dir)
 
         try:
-            # Extract project files
+            # Read and extract project files from the stashed zip
+            with open(zip_file_path, "rb") as f:
+                zip_data = f.read()
+
             with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
                 zf.extractall(temp_path)
 
@@ -77,12 +102,13 @@ class ContainerManager:
                 raise RuntimeError("requirements.txt not found in project")
 
             # Create container (but don't start yet)
-            # Use job_id as container name for easy lookup
+            # Use prefixed job_id as container name for namespace isolation
+            container_name = self._get_container_name(job_id)
             process = await asyncio.create_subprocess_exec(
                 "docker",
                 "create",
                 "--name",
-                job_id,
+                container_name,
                 "-v",
                 f"{temp_path}:/workspace:ro",
                 "-w",
@@ -98,9 +124,7 @@ class ContainerManager:
             stdout, stderr = await process.communicate()
 
             if process.returncode != 0:
-                raise RuntimeError(
-                    f"Failed to create container: {stderr.decode()}"
-                )
+                raise RuntimeError(f"Failed to create container: {stderr.decode()}")
 
             container_id = stdout.decode().strip()
             return container_id, temp_path
@@ -108,6 +132,7 @@ class ContainerManager:
         except Exception as e:
             # Clean up temp directory on failure
             import shutil
+
             shutil.rmtree(temp_path, ignore_errors=True)
             raise RuntimeError(f"Failed to create container: {e}") from e
 
@@ -144,15 +169,16 @@ class ContainerManager:
         Returns:
             ContainerInfo if container exists, None otherwise
         """
+        container_name = self._get_container_name(job_id)
         process = await asyncio.create_subprocess_exec(
             "docker",
             "inspect",
-            job_id,
+            container_name,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
 
-        stdout, stderr = await process.communicate()
+        stdout, _ = await process.communicate()
 
         if process.returncode != 0:
             # Container doesn't exist
@@ -322,21 +348,42 @@ class ContainerManager:
         for name in names:
             if not name:
                 continue
-            # Only include containers that look like UUIDs (job IDs)
-            # This filters out user-created containers with custom names
-            if self._is_job_id(name):
-                info = await self.get_container_info(name)
+            # Only include containers that match our prefix and have valid job IDs
+            # This filters out containers from other test instances and user containers
+            job_id = self._extract_job_id(name)
+            if job_id:
+                info = await self.get_container_info(job_id)
                 if info:
                     containers.append(info)
 
         return containers
 
-    def _is_job_id(self, name: str) -> bool:
-        """Check if a container name looks like a job ID (UUID format)."""
+    def _extract_job_id(self, container_name: str) -> str | None:
+        """
+        Extract job ID from container name by stripping prefix.
+
+        Args:
+            container_name: Full container name from Docker
+
+        Returns:
+            Job ID if container matches our prefix and name pattern, None otherwise
+        """
         import re
+
+        # Check if container has our prefix
+        if not container_name.startswith(self.container_name_prefix):
+            return None
+
+        # Strip prefix to get potential job ID
+        potential_job_id = container_name[len(self.container_name_prefix) :]
+
+        # Check if remaining part looks like a UUID (job ID format)
         # UUID format: 8-4-4-4-12 hex characters
         uuid_pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-        return bool(re.match(uuid_pattern, name))
+        if re.match(uuid_pattern, potential_job_id):
+            return potential_job_id
+
+        return None
 
     async def cleanup_container(self, job_id: str) -> None:
         """
@@ -348,7 +395,8 @@ class ContainerManager:
         This is a best-effort operation that won't raise exceptions.
         """
         try:
-            await self.remove_container(job_id, force=True)
+            container_name = self._get_container_name(job_id)
+            await self.remove_container(container_name, force=True)
         except Exception:
             # Best effort - don't fail if cleanup fails
             pass

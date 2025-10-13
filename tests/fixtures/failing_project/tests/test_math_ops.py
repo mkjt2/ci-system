@@ -1,4 +1,4 @@
-from src.math_ops import multiply, divide
+from src.math_ops import divide, multiply
 
 
 def test_multiply():

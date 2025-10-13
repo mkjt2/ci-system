@@ -9,13 +9,13 @@ import asyncio
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
 from ci_server.container_manager import ContainerInfo
 from ci_server.job_controller import JobController
-from ci_server.models import Job, JobEvent
+from ci_server.models import Job
 
 
 class TestJobController:
@@ -98,22 +98,35 @@ class TestJobController:
     async def test_reconcile_queued_job_with_registered_data(
         self, controller, mock_repository, mock_container_manager
     ):
-        """Test that queued job with registered data gets started."""
-        job = Job(id="test-job-id", status="queued")
-        mock_repository.list_jobs.return_value = [job]
-        mock_repository.get_job.return_value = job
-        mock_container_manager.list_ci_containers.return_value = []
+        """Test that queued job with zip file path gets started."""
+        # Create temp zip file
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as f:
+            zip_file_path = f.name
 
-        # Register job with temp directory
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
-            controller.active_jobs["test-job-id"] = temp_path
+        try:
+            job = Job(id="test-job-id", status="queued", zip_file_path=zip_file_path)
+            mock_repository.list_jobs.return_value = [job]
+            mock_repository.get_job.return_value = job
+            mock_container_manager.list_ci_containers.return_value = []
+            mock_container_manager.create_container.return_value = (
+                "container-123",
+                Path("/tmp/test"),
+            )
 
             await controller.reconcile_once()
 
             # Should start the container
-            mock_container_manager.start_container.assert_called_once_with("test-job-id")
+            mock_container_manager.create_container.assert_called_once()
+            mock_container_manager.start_container.assert_called_once_with(
+                "container-123"
+            )
             mock_repository.update_job_status.assert_called_once()
+        finally:
+            # Clean up temp file
+            import os
+
+            if os.path.exists(zip_file_path):
+                os.unlink(zip_file_path)
 
     @pytest.mark.asyncio
     async def test_reconcile_running_job_with_exited_container(
@@ -133,16 +146,9 @@ class TestJobController:
         )
         mock_container_manager.list_ci_containers.return_value = [container]
 
-        # Mock stream_logs to return async generator
-        async def mock_logs():
-            yield "test output\n"
-
-        mock_container_manager.stream_logs.return_value = mock_logs()
-
         await controller.reconcile_once()
 
-        # Should finalize the job
-        mock_repository.add_event.assert_called()
+        # Should finalize the job (logs NOT stored in DB - streamed on-demand)
         mock_repository.complete_job.assert_called_once()
 
     @pytest.mark.asyncio
@@ -183,8 +189,8 @@ class TestJobController:
 
         await controller.reconcile_once()
 
-        # Should cleanup the container
-        mock_container_manager.cleanup_container.assert_called_once_with("test-job-id")
+        # Should NOT cleanup the container (kept for log viewing)
+        mock_container_manager.cleanup_container.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_cleanup_orphaned_containers(
@@ -208,7 +214,9 @@ class TestJobController:
         await controller.reconcile_once()
 
         # Should cleanup the orphaned container
-        mock_container_manager.cleanup_container.assert_called_once_with("orphan-job-id")
+        mock_container_manager.cleanup_container.assert_called_once_with(
+            "orphan-job-id"
+        )
 
     @pytest.mark.asyncio
     async def test_register_job(self, controller):

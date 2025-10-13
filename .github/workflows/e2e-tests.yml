@@ -26,8 +26,11 @@ jobs:
           pip install -e ".[dev]"
           pip install pyright ruff
 
+      - name: Run ruff linting
+        run: ruff check ci_server/ ci_client/ tests/ setup.py
+
       - name: Run ruff format check
-        run: ruff format --check ci_server/ ci_client/ tests/e2e/ setup.py
+        run: ruff format --check ci_server/ ci_client/ tests/unit/ tests/e2e/ setup.py
 
       - name: Run type checking
         run: pyright
