@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
-from .executor import run_tests_in_docker, run_tests_in_docker_streaming
+from .executor import run_tests_in_docker_streaming
 from .models import Job, JobEvent
 from .repository import JobRepository
 from .sqlite_repository import SQLiteJobRepository
@@ -116,11 +116,102 @@ async def process_job_async(job_id: str, zip_data: bytes) -> None:
         await repo.complete_job(job_id, success=False, end_time=datetime.utcnow())
 
 
+async def stream_job_events(
+    job_id: str, request: Request | None = None, from_beginning: bool = True
+) -> AsyncGenerator[str, None]:
+    """
+    Helper function to stream job events as SSE.
+
+    Args:
+        job_id: UUID of the job to stream
+        request: Optional FastAPI request to check for client disconnection
+        from_beginning: If True, stream all events. If False, only stream new events.
+
+    Yields:
+        SSE-formatted event strings
+    """
+    repo = get_repository()
+    job = await repo.get_job(job_id)
+
+    if job is None:
+        yield f"data: {json.dumps({'type': 'log', 'data': 'Job not found.\\n'})}\n\n"
+        yield f"data: {json.dumps({'type': 'complete', 'success': False})}\n\n"
+        return
+
+    # Check if job is already completed when starting
+    if job.status == "completed" and not from_beginning:
+        # Job already completed and we're not showing history
+        yield f"data: {json.dumps({'type': 'log', 'data': 'Job already completed.\\n'})}\n\n"
+        # Still send the complete event with final status
+        if job.events and job.events[-1].type == "complete":
+            yield f"data: {json.dumps(job.events[-1].to_dict())}\n\n"
+        return
+
+    # Determine starting position
+    if from_beginning:
+        # Stream all existing events (replay from beginning)
+        for event in job.events:
+            yield f"data: {json.dumps(event.to_dict())}\n\n"
+            await asyncio.sleep(0.01)  # Small delay to avoid overwhelming client
+        last_index = len(job.events)
+    else:
+        # Start from current position (only new events)
+        last_index = len(job.events)
+
+    # If job is still running, continue polling for new events
+    if job.status == "running" or job.status == "queued":
+        while True:
+            # Re-fetch job to get latest status
+            current_job = await repo.get_job(job_id)
+            if current_job is None:
+                break
+
+            # Get new events since last check
+            new_events = await repo.get_events(job_id, from_index=last_index)
+            for event in new_events:
+                yield f"data: {json.dumps(event.to_dict())}\n\n"
+                last_index += 1
+
+            # Check if job completed
+            if current_job.status == "completed":
+                break
+
+            # Check if client has disconnected (if request provided)
+            if request and await request.is_disconnected():
+                return
+
+            await asyncio.sleep(0.1)  # Poll interval
+
+
 @app.post("/submit")
-async def submit_job(file: UploadFile = File(...)):
-    """Run tests in Docker, return results when complete (non-streaming)."""
-    success, output = await run_tests_in_docker(await file.read())
-    return {"success": success, "output": output}
+async def submit_job(request: Request, file: UploadFile = File(...)):
+    """
+    Run tests in Docker, stream results in real-time via SSE.
+
+    This is a unified implementation that creates a job, processes it in the
+    background, and streams the results. This reduces code duplication by
+    reusing the async job processing infrastructure.
+    """
+    job_id = str(uuid.uuid4())
+    zip_data = await file.read()
+    repo = get_repository()
+
+    # Create job entry in the database
+    job = Job(
+        id=job_id,
+        status="queued",
+    )
+    await repo.create_job(job)
+
+    # Start job processing in background (fire-and-forget)
+    asyncio.create_task(process_job_async(job_id, zip_data))
+
+    # Stream the results as they become available
+    return StreamingResponse(
+        stream_job_events(job_id, request, from_beginning=True),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
 
 
 @app.post("/submit-stream")
@@ -129,50 +220,30 @@ async def submit_job_stream(request: Request, file: UploadFile = File(...)):
     Run tests in Docker, stream results in real-time via SSE.
 
     Creates a job ID and tracks the job so users can reconnect with 'ci wait'.
-    Cancels the job if client disconnects (Ctrl-C).
+    First sends the job ID, then streams all events. This is now unified with
+    /submit endpoint but additionally sends the job_id event first.
     """
-    zip_data = await file.read()
     job_id = str(uuid.uuid4())
+    zip_data = await file.read()
     repo = get_repository()
 
-    # Create job in database
+    # Create job entry in the database
     job = Job(
         id=job_id,
-        status="running",
-        start_time=datetime.utcnow(),
+        status="queued",
     )
     await repo.create_job(job)
+
+    # Start job processing in background (fire-and-forget)
+    asyncio.create_task(process_job_async(job_id, zip_data))
 
     async def event_generator():
         # First, send the job ID so client can print it
         yield f"data: {json.dumps({'type': 'job_id', 'job_id': job_id})}\n\n"
 
-        # Create async generator task
-        gen = run_tests_in_docker_streaming(zip_data)
-
-        try:
-            async for event_dict in gen:
-                # Store event in database
-                event = JobEvent.from_dict(event_dict, timestamp=datetime.utcnow())
-                await repo.add_event(job_id, event)
-
-                # Update job status if complete
-                if event.type == "complete":
-                    await repo.complete_job(
-                        job_id,
-                        success=event.success or False,
-                        end_time=datetime.utcnow(),
-                    )
-
-                # Check if client has disconnected before yielding
-                if await request.is_disconnected():
-                    # Close the generator to trigger cleanup/cancellation
-                    await gen.aclose()
-                    return
-                yield f"data: {json.dumps(event_dict)}\n\n"
-        finally:
-            # Ensure generator is closed on any exit
-            await gen.aclose()
+        # Then stream all job events
+        async for event in stream_job_events(job_id, request, from_beginning=True):
+            yield event
 
     return StreamingResponse(
         event_generator(),
@@ -240,50 +311,8 @@ async def stream_job_logs(
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    async def event_generator() -> AsyncGenerator[str, None]:
-        # Check if job is already completed when starting
-        if job.status == "completed" and not from_beginning:
-            # Job already completed and we're not showing history
-            # Just send a status message and complete event
-            yield f"data: {json.dumps({'type': 'log', 'data': 'Job already completed.\\n'})}\n\n"
-            # Still send the complete event with final status
-            if job.events and job.events[-1].type == "complete":
-                yield f"data: {json.dumps(job.events[-1].to_dict())}\n\n"
-            return
-
-        # Determine starting position
-        if from_beginning:
-            # Stream all existing events (replay from beginning)
-            for event in job.events:
-                yield f"data: {json.dumps(event.to_dict())}\n\n"
-                await asyncio.sleep(0.01)  # Small delay to avoid overwhelming client
-            last_index = len(job.events)
-        else:
-            # Start from current position (only new events)
-            last_index = len(job.events)
-
-        # If job is still running, continue polling for new events
-        if job.status == "running":
-            while True:
-                # Re-fetch job to get latest status
-                current_job = await repo.get_job(job_id)
-                if current_job is None:
-                    break
-
-                # Get new events since last check
-                new_events = await repo.get_events(job_id, from_index=last_index)
-                for event in new_events:
-                    yield f"data: {json.dumps(event.to_dict())}\n\n"
-                    last_index += 1
-
-                # Check if job completed
-                if current_job.status == "completed":
-                    break
-
-                await asyncio.sleep(0.1)  # Poll interval
-
     return StreamingResponse(
-        event_generator(),
+        stream_job_events(job_id, request=None, from_beginning=from_beginning),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )

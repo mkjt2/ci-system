@@ -28,11 +28,12 @@ A simple CI system for Python projects. Users submit projects via CLI, which zip
 
 **Server** (`ci_server/`):
 - `app.py` - FastAPI app with multiple endpoints:
-  - `/submit` - Synchronous blocking endpoint
-  - `/submit-stream` - Synchronous streaming endpoint (SSE)
+  - `/submit` - Synchronous streaming endpoint (SSE). Creates a job, processes in background, streams results.
+  - `/submit-stream` - Same as `/submit` but also sends job_id event first for client display
   - `/submit-async` - Asynchronous submission, returns job ID immediately
   - `/jobs/{job_id}` - Get job status (queued/running/completed)
   - `/jobs/{job_id}/stream` - Stream job logs via SSE (supports reconnection)
+  - All streaming endpoints now use unified `stream_job_events()` helper to reduce code duplication
 - `executor.py` - Executes pytest in Docker container, supports streaming output
 - `repository.py` - Abstract interface for job persistence (supports multiple backends)
 - `sqlite_repository.py` - SQLite implementation of repository (default)
@@ -42,11 +43,13 @@ A simple CI system for Python projects. Users submit projects via CLI, which zip
 **Flow (Synchronous)**:
 1. User runs `ci submit test` from project root
 2. CLI zips project (excluding `.` and `__pycache__`)
-3. Client POSTs zip to `/submit-stream`
-4. Server extracts to temp dir, mounts read-only into Docker
-5. Docker runs `pip install -q -r requirements.txt && python -m pytest -v`
-6. Output streams back to client as Server-Sent Events
-7. CLI prints output in real-time, exits with pytest's exit code
+3. Client POSTs zip to `/submit`
+4. Server creates job in database (status: queued)
+5. Server starts async job processing in background (via `process_job_async`)
+6. Server streams job events back to client as they become available
+7. Background worker extracts project, mounts read-only into Docker, runs pytest
+8. Worker stores all events in database as they occur
+9. CLI prints output in real-time, exits with pytest's exit code
 
 **Flow (Asynchronous)**:
 1. User runs `ci submit test --async` from project root
