@@ -12,10 +12,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
-
-from ci_server.container_manager import ContainerInfo
-from ci_server.job_controller import JobController
-from ci_server.models import Job
+from ci_common.models import Job
+from ci_controller.container_manager import ContainerInfo
+from ci_controller.controller import JobController
 
 
 class TestJobController:

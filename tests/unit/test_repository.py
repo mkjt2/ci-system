@@ -10,9 +10,8 @@ import tempfile
 from datetime import datetime
 
 import pytest
-
-from ci_server.models import Job, JobEvent
-from ci_server.sqlite_repository import SQLiteJobRepository
+from ci_common.models import Job, JobEvent
+from ci_persistence.sqlite_repository import SQLiteJobRepository
 
 
 @pytest.fixture

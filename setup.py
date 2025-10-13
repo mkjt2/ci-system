@@ -3,7 +3,20 @@ from setuptools import find_packages, setup
 setup(
     name="ci-system",
     version="0.1.0",
-    packages=find_packages(include=["ci_server", "ci_server.*", "ci_client", "ci_client.*", "ci_controller", "ci_controller.*"]),
+    packages=find_packages(
+        include=[
+            "ci_common",
+            "ci_common.*",
+            "ci_persistence",
+            "ci_persistence.*",
+            "ci_controller",
+            "ci_controller.*",
+            "ci_server",
+            "ci_server.*",
+            "ci_client",
+            "ci_client.*",
+        ]
+    ),
     install_requires=[
         "requests>=2.31.0",
         "fastapi>=0.104.0",

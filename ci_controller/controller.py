@@ -11,8 +11,8 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from ci_server.models import Job
-from ci_server.repository import JobRepository
+from ci_common.models import Job
+from ci_common.repository import JobRepository
 
 from .container_manager import ContainerInfo, ContainerManager
 

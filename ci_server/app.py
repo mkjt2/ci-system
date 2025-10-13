@@ -11,12 +11,13 @@ from typing import Any
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
-from .container_manager import ContainerManager
+from ci_common.models import Job, JobEvent
+from ci_common.repository import JobRepository
+from ci_controller.container_manager import ContainerManager
+from ci_controller.controller import JobController
+from ci_persistence.sqlite_repository import SQLiteJobRepository
+
 from .executor import run_tests_in_docker_streaming
-from .job_controller import JobController
-from .models import Job, JobEvent
-from .repository import JobRepository
-from .sqlite_repository import SQLiteJobRepository
 
 # Configure logging
 logging.basicConfig(
