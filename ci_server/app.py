@@ -8,14 +8,15 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
-from ci_common.models import Job, JobEvent
+from ci_common.models import Job, JobEvent, User
 from ci_common.repository import JobRepository
 from ci_controller.container_manager import ContainerManager
 from ci_persistence.sqlite_repository import SQLiteJobRepository
 
+from .auth import create_get_current_user_dependency
 from .executor import run_tests_in_docker_streaming
 
 # Configure logging
@@ -119,6 +120,10 @@ def get_container_manager() -> ContainerManager:
     return container_manager
 
 
+# Create authentication dependency
+get_current_user = create_get_current_user_dependency(get_repository)
+
+
 async def process_job_async(job_id: str, zip_data: bytes) -> None:
     """
     Process a job asynchronously and store output in job store.
@@ -163,7 +168,11 @@ async def process_job_async(job_id: str, zip_data: bytes) -> None:
 
 
 async def stream_job_events(
-    job_id: str, request: Request | None = None, from_beginning: bool = True
+    job_id: str,
+    repo: JobRepository,
+    cm: ContainerManager,
+    request: Request | None = None,
+    from_beginning: bool = True,
 ) -> AsyncGenerator[str, None]:
     """
     Helper function to stream job events as SSE.
@@ -172,14 +181,14 @@ async def stream_job_events(
 
     Args:
         job_id: UUID of the job to stream
+        repo: JobRepository instance for database access
+        cm: ContainerManager instance for Docker operations
         request: Optional FastAPI request to check for client disconnection
         from_beginning: If True, stream all logs. If False, only stream new logs.
 
     Yields:
         SSE-formatted event strings
     """
-    repo = get_repository()
-    cm = get_container_manager()
 
     job = await repo.get_job(job_id)
 
@@ -264,9 +273,17 @@ async def stream_job_events(
 
 
 @app.post("/submit")
-async def submit_job(request: Request, file: UploadFile = File(...)):
+async def submit_job(
+    request: Request,
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    repo: JobRepository = Depends(get_repository),
+    cm: ContainerManager = Depends(get_container_manager),
+):
     """
     Run tests in Docker, stream results in real-time via SSE.
+
+    Requires authentication via API key (Bearer token in Authorization header).
 
     Uses controller pattern: stashes the zip file, creates a queued job,
     and the controller's reconciliation loop handles container creation
@@ -276,7 +293,6 @@ async def submit_job(request: Request, file: UploadFile = File(...)):
 
     job_id = str(uuid.uuid4())
     zip_data = await file.read()
-    repo = get_repository()
 
     # Stash the zip file to a temporary location
     fd, zip_file_path = tempfile.mkstemp(suffix=".zip", prefix=f"ci_job_{job_id}_")
@@ -287,27 +303,36 @@ async def submit_job(request: Request, file: UploadFile = File(...)):
         os.close(fd)
         raise
 
-    # Create job entry in the database with zip file path
+    # Create job entry in the database with zip file path and user ownership
     job = Job(
         id=job_id,
         status="queued",
         zip_file_path=zip_file_path,
+        user_id=user.id,
     )
     await repo.create_job(job)
 
     # Controller will pick up the queued job and start it
     # Stream the results as they become available
     return StreamingResponse(
-        stream_job_events(job_id, request, from_beginning=True),
+        stream_job_events(job_id, repo, cm, request, from_beginning=True),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
 
 
 @app.post("/submit-stream")
-async def submit_job_stream(request: Request, file: UploadFile = File(...)):
+async def submit_job_stream(
+    request: Request,
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    repo: JobRepository = Depends(get_repository),
+    cm: ContainerManager = Depends(get_container_manager),
+):
     """
     Run tests in Docker, stream results in real-time via SSE.
+
+    Requires authentication via API key (Bearer token in Authorization header).
 
     Creates a job ID and tracks the job so users can reconnect with 'ci wait'.
     First sends the job ID, then streams all events. Uses controller pattern.
@@ -316,7 +341,6 @@ async def submit_job_stream(request: Request, file: UploadFile = File(...)):
 
     job_id = str(uuid.uuid4())
     zip_data = await file.read()
-    repo = get_repository()
 
     # Stash the zip file to a temporary location
     fd, zip_file_path = tempfile.mkstemp(suffix=".zip", prefix=f"ci_job_{job_id}_")
@@ -327,11 +351,12 @@ async def submit_job_stream(request: Request, file: UploadFile = File(...)):
         os.close(fd)
         raise
 
-    # Create job entry in the database with zip file path
+    # Create job entry in the database with zip file path and user ownership
     job = Job(
         id=job_id,
         status="queued",
         zip_file_path=zip_file_path,
+        user_id=user.id,
     )
     await repo.create_job(job)
 
@@ -340,7 +365,9 @@ async def submit_job_stream(request: Request, file: UploadFile = File(...)):
         yield f"data: {json.dumps({'type': 'job_id', 'job_id': job_id})}\n\n"
 
         # Then stream all job events
-        async for event in stream_job_events(job_id, request, from_beginning=True):
+        async for event in stream_job_events(
+            job_id, repo, cm, request, from_beginning=True
+        ):
             yield event
 
     # Controller will pick up the queued job and start it
@@ -352,12 +379,20 @@ async def submit_job_stream(request: Request, file: UploadFile = File(...)):
 
 
 @app.post("/submit-async")
-async def submit_job_async(file: UploadFile = File(...)) -> dict[str, str]:
+async def submit_job_async(
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    repo: JobRepository = Depends(get_repository),
+) -> dict[str, str]:
     """
     Submit a job and return job ID immediately. Job runs in background.
 
+    Requires authentication via API key (Bearer token in Authorization header).
+
     Args:
         file: Uploaded zip file containing the project
+        user: Authenticated user (injected by dependency)
+        repo: Job repository (injected by dependency)
 
     Returns:
         Dictionary with job_id that can be used to query job status
@@ -369,7 +404,6 @@ async def submit_job_async(file: UploadFile = File(...)) -> dict[str, str]:
 
     job_id = str(uuid.uuid4())
     zip_data = await file.read()
-    repo = get_repository()
 
     # Stash the zip file to a temporary location
     fd, zip_file_path = tempfile.mkstemp(suffix=".zip", prefix=f"ci_job_{job_id}_")
@@ -380,11 +414,12 @@ async def submit_job_async(file: UploadFile = File(...)) -> dict[str, str]:
         os.close(fd)
         raise
 
-    # Create job entry in the database with zip file path
+    # Create job entry in the database with zip file path and user ownership
     job = Job(
         id=job_id,
         status="queued",
         zip_file_path=zip_file_path,
+        user_id=user.id,
     )
     await repo.create_job(job)
 
@@ -394,70 +429,105 @@ async def submit_job_async(file: UploadFile = File(...)) -> dict[str, str]:
 
 @app.get("/jobs/{job_id}/stream")
 async def stream_job_logs(
-    job_id: str, from_beginning: bool = False
+    job_id: str,
+    from_beginning: bool = False,
+    user: User = Depends(get_current_user),
+    repo: JobRepository = Depends(get_repository),
+    cm: ContainerManager = Depends(get_container_manager),
 ) -> StreamingResponse:
     """
     Stream logs for a job via Server-Sent Events (SSE).
+
+    Requires authentication. Users can only stream logs for their own jobs.
 
     Args:
         job_id: UUID of the job to stream logs for
         from_beginning: If True, streams all past events first. If False (default),
                        only streams new events from current position forward.
+        user: Authenticated user (injected by dependency)
+        repo: Job repository (injected by dependency)
+        cm: Container manager (injected by dependency)
 
     Returns:
         StreamingResponse with SSE format events
 
     Raises:
         HTTPException: 404 if job_id not found
+        HTTPException: 403 if user doesn't own this job
 
     By default (from_beginning=False), only streams new events. This is useful
     for monitoring a running job from another terminal without seeing all history.
     With from_beginning=True, replays all events from the start.
     """
-    repo = get_repository()
     job = await repo.get_job(job_id)
 
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
+    # Authorization: Users can only access their own jobs
+    if job.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
     return StreamingResponse(
-        stream_job_events(job_id, request=None, from_beginning=from_beginning),
+        stream_job_events(
+            job_id, repo, cm, request=None, from_beginning=from_beginning
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
 
 
 @app.get("/jobs")
-async def list_jobs() -> list[dict[str, Any]]:
+async def list_jobs(
+    user: User = Depends(get_current_user),
+    repo: JobRepository = Depends(get_repository),
+) -> list[dict[str, Any]]:
     """
-    List all jobs with their status and metadata.
+    List all jobs for the authenticated user.
+
+    Requires authentication. Users can only see their own jobs.
+
+    Args:
+        user: Authenticated user (injected by dependency)
+        repo: Job repository (injected by dependency)
 
     Returns:
         List of job dictionaries with job_id, status, success, start_time, and end_time
     """
-    repo = get_repository()
-    jobs = await repo.list_jobs()
+    jobs = await repo.list_user_jobs(user.id)
     return [job.to_summary_dict() for job in jobs]
 
 
 @app.get("/jobs/{job_id}")
-async def get_job_status(job_id: str) -> dict[str, Any]:
+async def get_job_status(
+    job_id: str,
+    user: User = Depends(get_current_user),
+    repo: JobRepository = Depends(get_repository),
+) -> dict[str, Any]:
     """
     Get job status and metadata (non-streaming).
 
+    Requires authentication. Users can only access their own jobs.
+
     Args:
         job_id: UUID of the job to query
+        user: Authenticated user (injected by dependency)
+        repo: Job repository (injected by dependency)
 
     Returns:
         Dictionary with job_id, status (queued/running/completed), and success (bool or None)
 
     Raises:
         HTTPException: 404 if job_id not found
+        HTTPException: 403 if user doesn't own this job
     """
-    repo = get_repository()
     job = await repo.get_job(job_id)
 
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
+
+    # Authorization: Users can only access their own jobs
+    if job.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
 
     return job.to_summary_dict()

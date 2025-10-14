@@ -9,7 +9,7 @@ from datetime import datetime
 
 import aiosqlite
 
-from ci_common.models import Job, JobEvent
+from ci_common.models import APIKey, Job, JobEvent, User
 from ci_common.repository import JobRepository
 
 
@@ -17,8 +17,10 @@ class SQLiteJobRepository(JobRepository):
     """
     SQLite-based job storage implementation.
 
-    Uses a single database file with two tables:
-    - jobs: Stores job metadata
+    Uses a single database file with multiple tables:
+    - users: Stores user accounts
+    - api_keys: Stores API keys (hashed) with foreign key to users
+    - jobs: Stores job metadata with foreign key to users
     - events: Stores job events with foreign key to jobs
     """
 
@@ -45,22 +47,86 @@ class SQLiteJobRepository(JobRepository):
         Create database tables if they don't exist.
 
         Schema:
-        - jobs table: Stores job metadata and status
-        - events table: Stores sequential events for each job
+        - users table: User accounts (id, name, email, created_at, is_active)
+        - api_keys table: API keys with foreign key to users
+        - jobs table: Job metadata and status with foreign key to users
+        - events table: Sequential events for each job
         """
         conn = await self._get_connection()
 
-        # Create jobs table
+        # Create users table
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS jobs (
+            CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
-                status TEXT NOT NULL,
-                success INTEGER,
-                start_time TEXT,
-                end_time TEXT,
-                container_id TEXT,
-                zip_file_path TEXT
+                name TEXT NOT NULL,
+                email TEXT UNIQUE NOT NULL,
+                created_at TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1
             )
+        """)
+
+        # Create API keys table with foreign key to users
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                key_hash TEXT UNIQUE NOT NULL,
+                name TEXT,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        """)
+
+        # Create index on key_hash for faster lookups
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash
+            ON api_keys(key_hash)
+        """)
+
+        # Check if jobs table exists and has user_id column
+        cursor = await conn.execute(
+            "SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name='user_id'"
+        )
+        row = await cursor.fetchone()
+        has_user_id = row is not None and row[0] > 0
+
+        if not has_user_id:
+            # Create jobs table with user_id
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS jobs (
+                    id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    success INTEGER,
+                    start_time TEXT,
+                    end_time TEXT,
+                    container_id TEXT,
+                    zip_file_path TEXT,
+                    user_id TEXT,
+                    FOREIGN KEY (user_id) REFERENCES users(id)
+                )
+            """)
+        else:
+            # Table exists with user_id, just ensure it exists
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS jobs (
+                    id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    success INTEGER,
+                    start_time TEXT,
+                    end_time TEXT,
+                    container_id TEXT,
+                    zip_file_path TEXT,
+                    user_id TEXT,
+                    FOREIGN KEY (user_id) REFERENCES users(id)
+                )
+            """)
+
+        # Create index on user_id for faster job filtering
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_jobs_user_id
+            ON jobs(user_id)
         """)
 
         # Create events table with foreign key to jobs
@@ -101,8 +167,8 @@ class SQLiteJobRepository(JobRepository):
 
         await conn.execute(
             """
-            INSERT INTO jobs (id, status, success, start_time, end_time, container_id, zip_file_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO jobs (id, status, success, start_time, end_time, container_id, zip_file_path, user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job.id,
@@ -112,6 +178,7 @@ class SQLiteJobRepository(JobRepository):
                 job.end_time.isoformat() if job.end_time else None,
                 job.container_id,
                 job.zip_file_path,
+                job.user_id,
             ),
         )
         await conn.commit()
@@ -130,7 +197,7 @@ class SQLiteJobRepository(JobRepository):
 
         # Get job metadata
         cursor = await conn.execute(
-            "SELECT id, status, success, start_time, end_time, container_id, zip_file_path FROM jobs WHERE id = ?",
+            "SELECT id, status, success, start_time, end_time, container_id, zip_file_path, user_id FROM jobs WHERE id = ?",
             (job_id,),
         )
         row = await cursor.fetchone()
@@ -147,6 +214,7 @@ class SQLiteJobRepository(JobRepository):
             end_time_str,
             container_id,
             zip_file_path,
+            user_id,
         ) = row
         start_time = datetime.fromisoformat(start_time_str) if start_time_str else None
         end_time = datetime.fromisoformat(end_time_str) if end_time_str else None
@@ -162,6 +230,7 @@ class SQLiteJobRepository(JobRepository):
             end_time=end_time,
             container_id=container_id,
             zip_file_path=zip_file_path,
+            user_id=user_id,
             events=events,
         )
 
@@ -300,7 +369,7 @@ class SQLiteJobRepository(JobRepository):
 
         cursor = await conn.execute(
             """
-            SELECT id, status, success, start_time, end_time, container_id, zip_file_path
+            SELECT id, status, success, start_time, end_time, container_id, zip_file_path, user_id
             FROM jobs
             ORDER BY start_time DESC
             """
@@ -318,6 +387,7 @@ class SQLiteJobRepository(JobRepository):
                 end_time_str,
                 container_id,
                 zip_file_path,
+                user_id,
             ) = row
             jobs.append(
                 Job(
@@ -332,8 +402,372 @@ class SQLiteJobRepository(JobRepository):
                     else None,
                     container_id=container_id,
                     zip_file_path=zip_file_path,
+                    user_id=user_id,
                     events=[],  # Don't load events for listing efficiency
                 )
             )
 
         return jobs
+
+    async def list_user_jobs(self, user_id: str) -> list[Job]:
+        """
+        List all jobs belonging to a specific user.
+
+        Args:
+            user_id: UUID of the user
+
+        Returns:
+            List of Job objects owned by the user
+        """
+        conn = await self._get_connection()
+
+        cursor = await conn.execute(
+            """
+            SELECT id, status, success, start_time, end_time, container_id, zip_file_path, user_id
+            FROM jobs
+            WHERE user_id = ?
+            ORDER BY start_time DESC
+            """,
+            (user_id,),
+        )
+
+        rows = await cursor.fetchall()
+
+        jobs = []
+        for row in rows:
+            (
+                job_id,
+                status,
+                success,
+                start_time_str,
+                end_time_str,
+                container_id,
+                zip_file_path,
+                user_id,
+            ) = row
+            jobs.append(
+                Job(
+                    id=job_id,
+                    status=status,
+                    success=bool(success) if success is not None else None,
+                    start_time=datetime.fromisoformat(start_time_str)
+                    if start_time_str
+                    else None,
+                    end_time=datetime.fromisoformat(end_time_str)
+                    if end_time_str
+                    else None,
+                    container_id=container_id,
+                    zip_file_path=zip_file_path,
+                    user_id=user_id,
+                    events=[],  # Don't load events for listing efficiency
+                )
+            )
+
+        return jobs
+
+    # User management methods
+
+    async def create_user(self, user: User) -> None:
+        """
+        Create a new user in the database.
+
+        Args:
+            user: User object to persist
+
+        Raises:
+            Exception: If user with same email already exists
+        """
+        conn = await self._get_connection()
+
+        await conn.execute(
+            """
+            INSERT INTO users (id, name, email, created_at, is_active)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                user.id,
+                user.name,
+                user.email,
+                user.created_at.isoformat(),
+                1 if user.is_active else 0,
+            ),
+        )
+        await conn.commit()
+
+    async def get_user(self, user_id: str) -> User | None:
+        """
+        Retrieve a user by their ID.
+
+        Args:
+            user_id: UUID of the user to retrieve
+
+        Returns:
+            User object if found, None otherwise
+        """
+        conn = await self._get_connection()
+
+        cursor = await conn.execute(
+            "SELECT id, name, email, created_at, is_active FROM users WHERE id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+
+        if row is None:
+            return None
+
+        user_id, name, email, created_at_str, is_active = row
+        return User(
+            id=user_id,
+            name=name,
+            email=email,
+            created_at=datetime.fromisoformat(created_at_str),
+            is_active=bool(is_active),
+        )
+
+    async def get_user_by_email(self, email: str) -> User | None:
+        """
+        Retrieve a user by their email address.
+
+        Args:
+            email: Email address of the user
+
+        Returns:
+            User object if found, None otherwise
+        """
+        conn = await self._get_connection()
+
+        cursor = await conn.execute(
+            "SELECT id, name, email, created_at, is_active FROM users WHERE email = ?",
+            (email,),
+        )
+        row = await cursor.fetchone()
+
+        if row is None:
+            return None
+
+        user_id, name, email, created_at_str, is_active = row
+        return User(
+            id=user_id,
+            name=name,
+            email=email,
+            created_at=datetime.fromisoformat(created_at_str),
+            is_active=bool(is_active),
+        )
+
+    async def list_users(self) -> list[User]:
+        """
+        List all users in the system.
+
+        Returns:
+            List of User objects
+        """
+        conn = await self._get_connection()
+
+        cursor = await conn.execute(
+            """
+            SELECT id, name, email, created_at, is_active
+            FROM users
+            ORDER BY created_at DESC
+            """
+        )
+
+        rows = await cursor.fetchall()
+
+        users = []
+        for row in rows:
+            user_id, name, email, created_at_str, is_active = row
+            users.append(
+                User(
+                    id=user_id,
+                    name=name,
+                    email=email,
+                    created_at=datetime.fromisoformat(created_at_str),
+                    is_active=bool(is_active),
+                )
+            )
+
+        return users
+
+    async def update_user_active_status(self, user_id: str, is_active: bool) -> None:
+        """
+        Update a user's active status (for deactivation/reactivation).
+
+        Args:
+            user_id: UUID of the user
+            is_active: New active status
+
+        Raises:
+            Exception: If user not found
+        """
+        conn = await self._get_connection()
+
+        await conn.execute(
+            "UPDATE users SET is_active = ? WHERE id = ?",
+            (1 if is_active else 0, user_id),
+        )
+        await conn.commit()
+
+    # API Key management methods
+
+    async def create_api_key(self, api_key: APIKey) -> None:
+        """
+        Create a new API key in the database.
+
+        Args:
+            api_key: APIKey object to persist (with hashed key)
+
+        Raises:
+            Exception: If API key with same hash already exists
+        """
+        conn = await self._get_connection()
+
+        await conn.execute(
+            """
+            INSERT INTO api_keys (id, user_id, key_hash, name, created_at, last_used_at, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                api_key.id,
+                api_key.user_id,
+                api_key.key_hash,
+                api_key.name,
+                api_key.created_at.isoformat(),
+                api_key.last_used_at.isoformat() if api_key.last_used_at else None,
+                1 if api_key.is_active else 0,
+            ),
+        )
+        await conn.commit()
+
+    async def get_api_key_by_hash(self, key_hash: str) -> APIKey | None:
+        """
+        Retrieve an API key by its hash.
+
+        Args:
+            key_hash: SHA-256 hash of the API key
+
+        Returns:
+            APIKey object if found, None otherwise
+        """
+        conn = await self._get_connection()
+
+        cursor = await conn.execute(
+            """
+            SELECT id, user_id, key_hash, name, created_at, last_used_at, is_active
+            FROM api_keys
+            WHERE key_hash = ?
+            """,
+            (key_hash,),
+        )
+        row = await cursor.fetchone()
+
+        if row is None:
+            return None
+
+        (
+            key_id,
+            user_id,
+            key_hash,
+            name,
+            created_at_str,
+            last_used_at_str,
+            is_active,
+        ) = row
+        return APIKey(
+            id=key_id,
+            user_id=user_id,
+            key_hash=key_hash,
+            name=name,
+            created_at=datetime.fromisoformat(created_at_str),
+            last_used_at=datetime.fromisoformat(last_used_at_str)
+            if last_used_at_str
+            else None,
+            is_active=bool(is_active),
+        )
+
+    async def list_user_api_keys(self, user_id: str) -> list[APIKey]:
+        """
+        List all API keys belonging to a specific user.
+
+        Args:
+            user_id: UUID of the user
+
+        Returns:
+            List of APIKey objects owned by the user
+        """
+        conn = await self._get_connection()
+
+        cursor = await conn.execute(
+            """
+            SELECT id, user_id, key_hash, name, created_at, last_used_at, is_active
+            FROM api_keys
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            """,
+            (user_id,),
+        )
+
+        rows = await cursor.fetchall()
+
+        api_keys = []
+        for row in rows:
+            (
+                key_id,
+                user_id,
+                key_hash,
+                name,
+                created_at_str,
+                last_used_at_str,
+                is_active,
+            ) = row
+            api_keys.append(
+                APIKey(
+                    id=key_id,
+                    user_id=user_id,
+                    key_hash=key_hash,
+                    name=name,
+                    created_at=datetime.fromisoformat(created_at_str),
+                    last_used_at=datetime.fromisoformat(last_used_at_str)
+                    if last_used_at_str
+                    else None,
+                    is_active=bool(is_active),
+                )
+            )
+
+        return api_keys
+
+    async def revoke_api_key(self, key_id: str) -> None:
+        """
+        Revoke an API key (set is_active to False).
+
+        Args:
+            key_id: UUID of the API key to revoke
+
+        Raises:
+            Exception: If API key not found
+        """
+        conn = await self._get_connection()
+
+        await conn.execute(
+            "UPDATE api_keys SET is_active = 0 WHERE id = ?",
+            (key_id,),
+        )
+        await conn.commit()
+
+    async def update_api_key_last_used(self, key_id: str, timestamp: datetime) -> None:
+        """
+        Update the last_used_at timestamp for an API key.
+
+        Args:
+            key_id: UUID of the API key
+            timestamp: Timestamp of last use
+
+        Raises:
+            Exception: If API key not found
+        """
+        conn = await self._get_connection()
+
+        await conn.execute(
+            "UPDATE api_keys SET last_used_at = ? WHERE id = ?",
+            (timestamp.isoformat(), key_id),
+        )
+        await conn.commit()

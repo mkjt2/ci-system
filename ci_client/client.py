@@ -19,6 +19,21 @@ def create_project_zip(project_dir: Path) -> bytes:
     return zip_buffer.getvalue()
 
 
+def get_auth_headers(api_key: str | None) -> dict[str, str]:
+    """
+    Get authentication headers for API requests.
+
+    Args:
+        api_key: API key for authentication (optional)
+
+    Returns:
+        Dictionary of HTTP headers including Authorization if api_key is provided
+    """
+    if api_key:
+        return {"Authorization": f"Bearer {api_key}"}
+    return {}
+
+
 def submit_tests(
     project_dir: Path, server_url: str = "http://localhost:8000"
 ) -> tuple[bool, str]:
@@ -43,7 +58,7 @@ def submit_tests(
 
 
 def submit_tests_streaming(
-    project_dir: Path, server_url: str = "http://localhost:8000"
+    project_dir: Path, server_url: str = "http://localhost:8000", api_key: str | None = None
 ) -> Generator[dict, None, None]:
     """Submit tests to the CI server with streaming output via SSE."""
     try:
@@ -56,6 +71,7 @@ def submit_tests_streaming(
                     "application/zip",
                 )
             },
+            headers=get_auth_headers(api_key),
             stream=True,
             timeout=300,
         )
@@ -64,13 +80,19 @@ def submit_tests_streaming(
         for line in response.iter_lines(decode_unicode=True):
             if line and line.startswith("data: "):
                 yield json.loads(line[6:])
+    except requests.exceptions.HTTPError as e:
+        # Check for authentication errors
+        if e.response is not None and e.response.status_code in (401, 403):
+            raise RuntimeError(f"Authentication failed: {e.response.status_code} {e.response.reason}")
+        yield {"type": "log", "data": f"Error submitting to CI server: {e}\n"}
+        yield {"type": "complete", "success": False}
     except requests.exceptions.RequestException as e:
         yield {"type": "log", "data": f"Error submitting to CI server: {e}\n"}
         yield {"type": "complete", "success": False}
 
 
 def submit_tests_async(
-    project_dir: Path, server_url: str = "http://localhost:8000"
+    project_dir: Path, server_url: str = "http://localhost:8000", api_key: str | None = None
 ) -> str:
     """
     Submit tests to the CI server asynchronously and return job ID immediately.
@@ -78,6 +100,7 @@ def submit_tests_async(
     Args:
         project_dir: Path to the project directory to test
         server_url: Base URL of the CI server
+        api_key: API key for authentication (optional)
 
     Returns:
         str: UUID job ID that can be used to query job status or wait for completion
@@ -98,21 +121,28 @@ def submit_tests_async(
                     "application/zip",
                 )
             },
+            headers=get_auth_headers(api_key),
             timeout=30,
         )
         response.raise_for_status()
         result = response.json()
         return result["job_id"]
+    except requests.exceptions.HTTPError as e:
+        # Check for authentication errors
+        if e.response is not None and e.response.status_code in (401, 403):
+            raise RuntimeError(f"Authentication failed: {e.response.status_code} {e.response.reason}")
+        raise RuntimeError(f"Error submitting to CI server: {e}")
     except requests.exceptions.RequestException as e:
         raise RuntimeError(f"Error submitting to CI server: {e}")
 
 
-def list_jobs(server_url: str = "http://localhost:8000") -> list[dict]:
+def list_jobs(server_url: str = "http://localhost:8000", api_key: str | None = None) -> list[dict]:
     """
     List all jobs from the CI server.
 
     Args:
         server_url: Base URL of the CI server
+        api_key: API key for authentication (optional)
 
     Returns:
         List of job dictionaries with job_id, status, success, start_time, and end_time
@@ -121,15 +151,24 @@ def list_jobs(server_url: str = "http://localhost:8000") -> list[dict]:
         RuntimeError: If the request fails
     """
     try:
-        response = requests.get(f"{server_url}/jobs", timeout=10)
+        response = requests.get(
+            f"{server_url}/jobs",
+            headers=get_auth_headers(api_key),
+            timeout=10
+        )
         response.raise_for_status()
         return response.json()
+    except requests.exceptions.HTTPError as e:
+        # Check for authentication errors
+        if e.response is not None and e.response.status_code in (401, 403):
+            raise RuntimeError(f"Authentication failed: {e.response.status_code} {e.response.reason}")
+        raise RuntimeError(f"Error fetching jobs from CI server: {e}")
     except requests.exceptions.RequestException as e:
         raise RuntimeError(f"Error fetching jobs from CI server: {e}")
 
 
 def wait_for_job(
-    job_id: str, server_url: str = "http://localhost:8000", from_beginning: bool = False
+    job_id: str, server_url: str = "http://localhost:8000", from_beginning: bool = False, api_key: str | None = None
 ) -> Generator[dict, None, None]:
     """
     Wait for a job to complete and stream its output via Server-Sent Events.
@@ -139,6 +178,7 @@ def wait_for_job(
         server_url: Base URL of the CI server
         from_beginning: If True, streams all logs from the beginning.
                        If False (default), only streams new logs from current position.
+        api_key: API key for authentication (optional)
 
     Yields:
         dict: Event dictionaries with 'type' and other fields:
@@ -155,6 +195,7 @@ def wait_for_job(
         response = requests.get(
             f"{server_url}/jobs/{job_id}/stream",
             params=params,
+            headers=get_auth_headers(api_key),
             stream=True,
             timeout=300,
         )
@@ -164,6 +205,12 @@ def wait_for_job(
         for line in response.iter_lines(decode_unicode=True):
             if line and line.startswith("data: "):
                 yield json.loads(line[6:])
+    except requests.exceptions.HTTPError as e:
+        # Check for authentication errors
+        if e.response is not None and e.response.status_code in (401, 403):
+            raise RuntimeError(f"Authentication failed: {e.response.status_code} {e.response.reason}")
+        yield {"type": "log", "data": f"Error waiting for job: {e}\n"}
+        yield {"type": "complete", "success": False}
     except requests.exceptions.RequestException as e:
         yield {"type": "log", "data": f"Error waiting for job: {e}\n"}
         yield {"type": "complete", "success": False}

@@ -30,3 +30,7 @@ exclude = [
 "__init__.py" = ["F401"]
 # FastAPI routes use File() in defaults - this is idiomatic
 "ci_server/app.py" = ["B008"]
+# FastAPI dependencies use Depends() and Security() in defaults - this is idiomatic
+"ci_server/auth.py" = ["B008"]
+# Tests need to catch broad exceptions to verify error handling
+"tests/**" = ["B017"]

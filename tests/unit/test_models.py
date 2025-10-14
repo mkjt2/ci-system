@@ -7,7 +7,7 @@ deserialization, and edge case handling.
 
 from datetime import datetime, timezone
 
-from ci_common.models import Job, JobEvent
+from ci_common.models import APIKey, Job, JobEvent, User
 
 
 class TestJobEvent:
@@ -295,3 +295,198 @@ class TestJob:
 
         # Should still produce ISO format (without Z suffix since no timezone)
         assert result["start_time"] == "2024-01-15T10:30:00Z"
+
+    def test_job_with_user_id(self):
+        """Test that user_id field is stored correctly."""
+        job = Job(
+            id="test-job-11",
+            status="queued",
+            user_id="user-123",
+        )
+
+        assert job.user_id == "user-123"
+        # Note: user_id is not included in to_dict() or to_summary_dict()
+        # as it's internal metadata
+
+
+class TestUser:
+    """Test suite for User class."""
+
+    def test_minimal_user_creation(self):
+        """Test creating a user with minimal required fields."""
+        created_at = datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        user = User(
+            id="user-123",
+            name="Alice",
+            email="alice@example.com",
+            created_at=created_at,
+        )
+
+        assert user.id == "user-123"
+        assert user.name == "Alice"
+        assert user.email == "alice@example.com"
+        assert user.created_at == created_at
+        assert user.is_active is True  # Default value
+
+    def test_user_inactive(self):
+        """Test creating an inactive user."""
+        created_at = datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        user = User(
+            id="user-456",
+            name="Bob",
+            email="bob@example.com",
+            created_at=created_at,
+            is_active=False,
+        )
+
+        assert user.is_active is False
+
+    def test_user_to_dict(self):
+        """Test serializing a user to dictionary."""
+        created_at = datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        user = User(
+            id="user-789",
+            name="Charlie",
+            email="charlie@example.com",
+            created_at=created_at,
+            is_active=True,
+        )
+
+        result = user.to_dict()
+
+        assert result == {
+            "id": "user-789",
+            "name": "Charlie",
+            "email": "charlie@example.com",
+            "created_at": "2024-01-15T10:00:00+00:00Z",
+            "is_active": True,
+        }
+
+    def test_user_to_dict_inactive(self):
+        """Test serializing an inactive user."""
+        created_at = datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        user = User(
+            id="user-999",
+            name="Deactivated User",
+            email="deactivated@example.com",
+            created_at=created_at,
+            is_active=False,
+        )
+
+        result = user.to_dict()
+
+        assert result["is_active"] is False
+
+
+class TestAPIKey:
+    """Test suite for APIKey class."""
+
+    def test_minimal_api_key_creation(self):
+        """Test creating an API key with minimal required fields."""
+        api_key = APIKey(
+            id="key-123",
+            user_id="user-456",
+            key_hash="abc123def456",
+        )
+
+        assert api_key.id == "key-123"
+        assert api_key.user_id == "user-456"
+        assert api_key.key_hash == "abc123def456"
+        assert api_key.name is None
+        assert api_key.last_used_at is None
+        assert api_key.is_active is True  # Default value
+        # created_at should be auto-generated
+        assert isinstance(api_key.created_at, datetime)
+
+    def test_api_key_with_all_fields(self):
+        """Test creating an API key with all fields."""
+        created_at = datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        last_used_at = datetime(2024, 1, 15, 11, 30, 0, tzinfo=timezone.utc)
+
+        api_key = APIKey(
+            id="key-789",
+            user_id="user-123",
+            key_hash="hashhash",
+            name="Production Key",
+            created_at=created_at,
+            last_used_at=last_used_at,
+            is_active=True,
+        )
+
+        assert api_key.name == "Production Key"
+        assert api_key.created_at == created_at
+        assert api_key.last_used_at == last_used_at
+        assert api_key.is_active is True
+
+    def test_api_key_revoked(self):
+        """Test creating a revoked API key."""
+        api_key = APIKey(
+            id="key-999",
+            user_id="user-123",
+            key_hash="revoked_hash",
+            is_active=False,
+        )
+
+        assert api_key.is_active is False
+
+    def test_api_key_to_dict(self):
+        """Test serializing an API key to dictionary."""
+        created_at = datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        last_used_at = datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+
+        api_key = APIKey(
+            id="key-abc",
+            user_id="user-xyz",
+            key_hash="somehash123",
+            name="Test Key",
+            created_at=created_at,
+            last_used_at=last_used_at,
+            is_active=True,
+        )
+
+        result = api_key.to_dict()
+
+        assert result == {
+            "id": "key-abc",
+            "user_id": "user-xyz",
+            "name": "Test Key",
+            "created_at": "2024-01-15T10:00:00+00:00Z",
+            "last_used_at": "2024-01-15T12:00:00+00:00Z",
+            "is_active": True,
+        }
+        # Note: key_hash is not included in to_dict() for security
+
+    def test_api_key_to_dict_never_used(self):
+        """Test serializing an API key that was never used."""
+        created_at = datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+
+        api_key = APIKey(
+            id="key-def",
+            user_id="user-xyz",
+            key_hash="newhash",
+            name="Unused Key",
+            created_at=created_at,
+            last_used_at=None,
+            is_active=True,
+        )
+
+        result = api_key.to_dict()
+
+        assert result["last_used_at"] is None
+
+    def test_api_key_to_dict_no_name(self):
+        """Test serializing an API key without a name."""
+        created_at = datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+
+        api_key = APIKey(
+            id="key-ghi",
+            user_id="user-xyz",
+            key_hash="anotherhash",
+            name=None,
+            created_at=created_at,
+            is_active=True,
+        )
+
+        result = api_key.to_dict()
+
+        assert result["name"] is None

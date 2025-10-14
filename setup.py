@@ -15,6 +15,8 @@ setup(
             "ci_server.*",
             "ci_client",
             "ci_client.*",
+            "ci_admin",
+            "ci_admin.*",
         ]
     ),
     install_requires=[
@@ -23,6 +25,7 @@ setup(
         "uvicorn>=0.24.0",
         "python-multipart>=0.0.6",
         "aiosqlite>=0.19.0",
+        "click>=8.1.0",
     ],
     extras_require={
         "dev": [
@@ -35,6 +38,7 @@ setup(
         "console_scripts": [
             "ci=ci_client.cli:main",
             "ci-controller=ci_controller.__main__:main",
+            "ci-admin=ci_admin.cli:cli",
         ],
     },
     python_requires=">=3.8",

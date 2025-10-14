@@ -6,7 +6,7 @@ independent of the underlying storage mechanism.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -46,6 +46,62 @@ class JobEvent:
 
 
 @dataclass
+class User:
+    """
+    Represents a user account in the CI system.
+
+    Users own API keys and jobs, providing authentication and authorization.
+    """
+
+    id: str  # UUID
+    name: str  # Display name
+    email: str  # Email address (unique)
+    created_at: datetime
+    is_active: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert user to dictionary format (for API responses)."""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "email": self.email,
+            "created_at": self.created_at.isoformat() + "Z",
+            "is_active": self.is_active,
+        }
+
+
+@dataclass
+class APIKey:
+    """
+    Represents an API key for authentication.
+
+    API keys are hashed before storage (SHA-256). The plaintext key is only
+    shown once during creation and must be saved by the user.
+    """
+
+    id: str  # UUID (internal ID, not the actual key)
+    user_id: str  # Owner of this API key
+    key_hash: str  # SHA-256 hash of the actual API key
+    name: str | None = None  # Optional description (e.g., "Production Key")
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    last_used_at: datetime | None = None  # Updated on each use
+    is_active: bool = True  # For revocation
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert API key to dictionary format (for API responses)."""
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "name": self.name,
+            "created_at": self.created_at.isoformat() + "Z",
+            "last_used_at": self.last_used_at.isoformat() + "Z"
+            if self.last_used_at
+            else None,
+            "is_active": self.is_active,
+        }
+
+
+@dataclass
 class Job:
     """
     Represents a CI test job with its metadata and execution history.
@@ -62,6 +118,7 @@ class Job:
     end_time: datetime | None = None
     container_id: str | None = None  # Docker container ID for this job
     zip_file_path: str | None = None  # Path to stashed zip file (for queued jobs)
+    user_id: str | None = None  # Owner of this job (for access control)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert job to dictionary format (for API responses)."""

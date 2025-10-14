@@ -266,7 +266,7 @@ class TestListJobs:
         assert len(jobs) == 2
         assert jobs[0]["job_id"] == "job-1"
         assert jobs[1]["job_id"] == "job-2"
-        mock_get.assert_called_once_with("http://test-server:8000/jobs", timeout=10)
+        mock_get.assert_called_once_with("http://test-server:8000/jobs", headers={}, timeout=10)
 
     @patch("ci_client.client.requests.get")
     def test_network_error_raises_exception(self, mock_get):
