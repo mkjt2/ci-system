@@ -32,6 +32,7 @@ setup(
             "pytest>=7.4.0",
             "pytest-asyncio>=0.21.0",
             "pytest-xdist>=3.3.0",
+            "httpx>=0.28.1",
         ],
     },
     entry_points={
