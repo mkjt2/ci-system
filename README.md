@@ -138,11 +138,14 @@ pip install -e .
 
 **Run Tests:**
 ```bash
-# Run all tests with parallel execution (default, auto-detects CPU cores)
+# Run all tests (uses 1 worker by default, configured in pytest.ini)
 pytest tests/ -v
 
-# Run tests sequentially (useful for debugging)
+# Run tests sequentially with no parallelization (useful for debugging)
 pytest tests/ -v -n 0
+
+# Run tests with auto CPU core detection
+pytest tests/ -v -n auto
 
 # Run only unit tests
 pytest tests/unit/ -v
@@ -153,10 +156,10 @@ pytest tests/e2e/ -v
 
 **Test Parallelization:**
 
-Tests automatically run in parallel using pytest-xdist with `-n auto`, which creates one worker per CPU core:
-- **Local (12 cores)**: 12 parallel workers
-- **GitHub Actions (4 cores)**: 4 parallel workers
-- **Debug mode**: Use `-n 0` to disable parallelization
+Tests run with pytest-xdist using **1 worker** by default (configured in `pytest.ini` with `addopts = -n 1`). This provides basic parallelization while ensuring test stability:
+- **Default mode**: `pytest tests/ -v` (uses 1 worker)
+- **Sequential mode**: `pytest tests/ -v -n 0` (no parallelization, useful for debugging)
+- **Auto-detect mode**: `pytest tests/ -v -n auto` (creates one worker per CPU core)
 
 Each worker runs tests independently with isolated server ports (8001, 8002, etc.) and separate SQLite databases to prevent conflicts.
 
