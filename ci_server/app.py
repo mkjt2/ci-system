@@ -14,7 +14,6 @@ from fastapi.responses import StreamingResponse
 from ci_common.models import Job, JobEvent
 from ci_common.repository import JobRepository
 from ci_controller.container_manager import ContainerManager
-from ci_controller.controller import JobController
 from ci_persistence.sqlite_repository import SQLiteJobRepository
 
 from .executor import run_tests_in_docker_streaming
@@ -27,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Global instances (initialized at startup)
 repository: JobRepository | None = None
-job_controller: JobController | None = None
+container_manager: ContainerManager | None = None
 
 
 def get_database_path() -> str:
@@ -62,31 +61,27 @@ async def lifespan(app: FastAPI):
     Lifespan context manager for FastAPI app.
 
     Handles startup and shutdown events:
-    - Startup: Initialize database, create tables, start job controller
-    - Shutdown: Stop job controller, close database connections
-    """
-    global repository, job_controller
+    - Startup: Connect to database (schema managed by ci-controller)
+    - Shutdown: Close database connections
 
-    # Startup: Initialize the repository with configured database path
+    Note: The ci-controller service must be running separately to execute jobs.
+    The server only handles HTTP API requests and database operations.
+    """
+    global repository, container_manager
+
+    # Startup: Connect to the database (controller initializes schema)
     db_path = get_database_path()
     repository = SQLiteJobRepository(db_path)
-    await repository.initialize()
+    # NOTE: Controller owns schema initialization via repository.initialize()
+    # Server only connects to existing database
 
-    # Initialize and start the job controller with container namespace isolation
+    # Initialize container manager for log streaming (read-only operations)
     container_prefix = get_container_prefix()
     container_manager = ContainerManager(container_name_prefix=container_prefix)
-    job_controller = JobController(
-        repository=repository,
-        container_manager=container_manager,
-        reconcile_interval=2.0,
-    )
-    await job_controller.start()
 
     yield
 
-    # Shutdown: Stop controller and close repository connections
-    if job_controller:
-        await job_controller.stop()
+    # Shutdown: Close repository connections
     if repository:
         await repository.close()
 
@@ -109,19 +104,21 @@ def get_repository() -> JobRepository:
     return repository
 
 
-def get_controller() -> JobController:
+def get_container_manager() -> ContainerManager:
     """
-    Get the global job controller instance.
+    Get the global container manager instance.
 
     Returns:
-        The initialized JobController
+        The initialized ContainerManager
 
     Raises:
-        RuntimeError: If controller is not initialized
+        RuntimeError: If container manager is not initialized
     """
-    if job_controller is None:
-        raise RuntimeError("Job controller not initialized")
-    return job_controller
+    if container_manager is None:
+        raise RuntimeError("Container manager not initialized")
+    return container_manager
+
+
 
 
 async def process_job_async(job_id: str, zip_data: bytes) -> None:
@@ -184,7 +181,7 @@ async def stream_job_events(
         SSE-formatted event strings
     """
     repo = get_repository()
-    controller = get_controller()
+    cm = get_container_manager()
 
     job = await repo.get_job(job_id)
 
@@ -218,9 +215,7 @@ async def stream_job_events(
         # Otherwise stream all logs from completed container (when --all is used)
         if job.container_id:
             try:
-                async for log_line in controller.container_manager.stream_logs(
-                    job.container_id, follow=False
-                ):
+                async for log_line in cm.stream_logs(job.container_id, follow=False):
                     yield f"data: {json.dumps({'type': 'log', 'data': log_line})}\n\n"
 
                     # Check if client disconnected
@@ -239,9 +234,7 @@ async def stream_job_events(
     if job.status == "running" and job.container_id:
         try:
             # Stream logs directly from Docker (with --follow for real-time)
-            async for log_line in controller.container_manager.stream_logs(
-                job.container_id, follow=True
-            ):
+            async for log_line in cm.stream_logs(job.container_id, follow=True):
                 yield f"data: {json.dumps({'type': 'log', 'data': log_line})}\n\n"
 
                 # Check if client disconnected

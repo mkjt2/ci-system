@@ -83,8 +83,55 @@ def wait_for_server_ready(proc, port, max_wait=10):
 
 
 @pytest.fixture
-def server_process(test_db_path, worker_id, monkeypatch):
-    """Start the CI server and tear it down after the test."""
+def controller_process(test_db_path, worker_id, monkeypatch):
+    """Start the CI controller and tear it down after the test."""
+    # Use same container prefix logic as server
+    if worker_id == "master":
+        container_prefix = f"{SESSION_ID}_"
+    else:
+        container_prefix = f"{SESSION_ID}_{worker_id}_"
+
+    # Set environment variables for controller
+    env = os.environ.copy()
+    env["CI_DB_PATH"] = test_db_path
+    env["CI_CONTAINER_PREFIX"] = container_prefix
+
+    # Start controller
+    proc = subprocess.Popen(
+        ["python", "-m", "ci_controller"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+
+    # Wait for controller to initialize (simple wait, controller starts quickly)
+    time.sleep(1)
+
+    # Check if controller crashed during startup
+    if proc.poll() is not None:
+        _, stderr = proc.communicate()
+        raise RuntimeError(
+            f"Controller crashed during startup. stderr: {stderr.decode()}"
+        )
+
+    try:
+        yield proc
+    finally:
+        # Teardown: stop controller
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+
+@pytest.fixture
+def server_process(test_db_path, worker_id, controller_process, monkeypatch):
+    """Start the CI server and tear it down after the test.
+
+    Note: Depends on controller_process to ensure controller starts first.
+    """
     # Use a unique port for each worker to support parallel test execution
     # worker_id is 'master' when not running in parallel, or 'gw0', 'gw1', etc. when parallel
     if worker_id == "master":
@@ -461,8 +508,13 @@ def test_ci_list(server_process):
     assert "✗" in output
 
 
-def test_job_persistence_across_server_restart(server_process, test_db_path):
-    """Test that jobs persist when the server is restarted."""
+def test_job_persistence_across_server_restart(
+    controller_process, server_process, test_db_path
+):
+    """Test that jobs persist when the server is restarted.
+
+    Note: Controller keeps running, only server restarts.
+    """
     # Get the current server URL from environment
     server_url = os.environ.get("CI_SERVER_URL", "http://localhost:8000")
     port = server_url.split(":")[-1]
@@ -486,7 +538,7 @@ def test_job_persistence_across_server_restart(server_process, test_db_path):
     assert job_before["status"] == "completed"
     assert job_before["success"] is True
 
-    # Restart the server
+    # Restart the server (controller keeps running)
     server_process.terminate()
     server_process.wait(timeout=5)
     time.sleep(1)

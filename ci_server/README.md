@@ -10,13 +10,30 @@ This module provides the HTTP interface for the CI system, enabling clients to:
 - Query job status and history
 - List all jobs with filtering
 
-The server delegates execution to the `JobController` and persistence to the `JobRepository`, acting as a thin API layer.
+The server is a **stateless HTTP API** that writes jobs to the database. Job execution is handled by the separate `ci-controller` service.
 
 ## Architecture
+
+The server is a **stateless HTTP API** that:
+- ✅ Accepts job submissions via REST endpoints
+- ✅ Writes job metadata to SQLite database
+- ✅ Streams job logs from Docker containers via SSE
+- ✅ Can be scaled horizontally (multiple replicas)
+
+The server does **NOT**:
+- ❌ Execute jobs (done by ci-controller)
+- ❌ Manage Docker containers (done by ci-controller)
+- ❌ Initialize database schema (done by ci-controller)
+
+This separation allows:
+- Multiple server replicas for high availability
+- Independent scaling of API and execution layers
+- Clean separation of concerns
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        ci_server                            │
+│                      (Multi-replica OK)                     │
 │                                                             │
 │  ┌─────────────────────────────────────────────────────┐   │
 │  │              FastAPI Application                    │   │
@@ -28,13 +45,23 @@ The server delegates execution to the `JobController` and persistence to the `Jo
 │  │  GET    /jobs/{id}       - Get job status          │   │
 │  │  GET    /jobs            - List all jobs           │   │
 │  └─────────────────────────────────────────────────────┘   │
-│                     │                    │                  │
-│                     ▼                    ▼                  │
-│           ┌──────────────────┐  ┌─────────────────┐        │
-│           │  JobController   │  │  JobRepository  │        │
-│           │  (Execution)     │  │  (Persistence)  │        │
-│           └──────────────────┘  └─────────────────┘        │
+│                              │                              │
+│                              ▼                              │
+│                     ┌─────────────────┐                     │
+│                     │  JobRepository  │                     │
+│                     │  (Persistence)  │                     │
+│                     └─────────────────┘                     │
 └─────────────────────────────────────────────────────────────┘
+                               │
+                               │ Shared database
+                               │
+                ┌──────────────▼──────────────┐
+                │     ci-controller           │
+                │     (Singleton)             │
+                │  - Reads jobs from DB       │
+                │  - Executes in containers   │
+                │  - Updates job status       │
+                └─────────────────────────────┘
 ```
 
 ## Components
@@ -46,32 +73,33 @@ Main FastAPI application with endpoint definitions.
 #### Lifecycle Management
 
 **Startup:**
-1. Initialize database repository
-2. Create job controller with container manager
-3. Start reconciliation loop
-4. Perform initial reconciliation (crash recovery)
+1. Connect to database (schema must already exist)
+2. Initialize container manager for log streaming
 
 **Shutdown:**
-1. Stop job controller gracefully
-2. Close database connections
-3. Clean up active resources
+1. Close database connections
+
+**Note:** The server no longer manages the controller lifecycle. The `ci-controller` service must be started separately.
 
 ```python
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    repository = SQLiteJobRepository(get_database_path())
-    await repository.initialize()
+    global repository, container_manager
 
-    container_manager = ContainerManager(container_name_prefix=get_container_prefix())
-    job_controller = JobController(repository, container_manager, reconcile_interval=2.0)
-    await job_controller.start()
+    # Startup: Connect to database (controller initializes schema)
+    db_path = get_database_path()
+    repository = SQLiteJobRepository(db_path)
+    # Controller owns schema initialization via repository.initialize()
+
+    # Initialize container manager for log streaming (read-only operations)
+    container_prefix = get_container_prefix()
+    container_manager = ContainerManager(container_name_prefix=container_prefix)
 
     yield
 
     # Shutdown
-    await job_controller.stop()
-    await repository.close()
+    if repository:
+        await repository.close()
 ```
 
 #### API Endpoints

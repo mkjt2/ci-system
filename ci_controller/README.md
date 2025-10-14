@@ -203,9 +203,49 @@ The controller automatically recovers from:
 - **Network issues**: Retries operations on next reconciliation cycle
 - **Resource leaks**: Cleans up orphaned containers and temp directories
 
-## Usage Examples
+## Usage
 
-### Basic Setup
+### Standalone Mode
+
+The controller can run as a standalone process, independent of the CI server:
+
+```bash
+# Run with default settings
+ci-controller
+
+# Run as Python module
+python -m ci_controller
+
+# Use custom database path
+ci-controller --db-path /path/to/custom.db
+
+# Adjust reconciliation interval
+ci-controller --interval 5.0
+
+# Use container prefix for isolation (useful for parallel testing)
+ci-controller --container-prefix ci_prod_
+
+# Enable debug logging
+ci-controller --log-level DEBUG
+
+# Combine multiple options
+ci-controller --db-path /tmp/ci.db --interval 1.0 --log-level DEBUG
+```
+
+**Command-line Options:**
+
+| Option | Environment Variable | Default | Description |
+|--------|---------------------|---------|-------------|
+| `--db-path` | `CI_DB_PATH` | `ci_jobs.db` | Path to SQLite database file |
+| `--container-prefix` | `CI_CONTAINER_PREFIX` | `""` | Container name prefix for namespace isolation |
+| `--interval` | `CI_RECONCILE_INTERVAL` | `2.0` | Seconds between reconciliation loops |
+| `--log-level` | N/A | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL) |
+
+**Note:** Command-line arguments override environment variables.
+
+### Programmatic Usage
+
+You can also embed the controller in your own application:
 
 ```python
 from ci_controller.controller import JobController
@@ -237,37 +277,68 @@ await controller.stop()
 await repository.close()
 ```
 
-### Integration with Server
+## Deployment
 
-```python
-# ci_server/app.py
-from fastapi import FastAPI
-from contextlib import asynccontextmanager
+### Production Setup
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global repository, job_controller
+The controller should run as a **singleton service** (exactly one instance):
 
-    # Startup
-    repository = SQLiteJobRepository(get_database_path())
-    await repository.initialize()
+```bash
+# Using systemd (Linux)
+sudo systemctl start ci-controller
 
-    container_manager = ContainerManager(container_name_prefix=get_container_prefix())
-    job_controller = JobController(
-        repository=repository,
-        container_manager=container_manager,
-        reconcile_interval=2.0
-    )
-    await job_controller.start()
+# Using Docker
+docker run -d \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /data/ci_jobs.db:/data/ci_jobs.db \
+  -e CI_DB_PATH=/data/ci_jobs.db \
+  ci-controller
 
-    yield
-
-    # Shutdown
-    await job_controller.stop()
-    await repository.close()
-
-app = FastAPI(lifespan=lifespan)
+# Using Kubernetes (single replica)
+kubectl apply -f ci-controller-deployment.yaml
 ```
+
+**Why Singleton?**
+- Prevents duplicate job execution
+- Ensures consistent state management
+- Single source of truth for container lifecycle
+
+### Startup Order
+
+The controller **must start before** the server(s):
+
+1. **Controller** starts first → Initializes DB schema
+2. **Server(s)** start second → Connect to existing DB
+3. Clients submit jobs → Server writes to DB → Controller picks up and executes
+
+### Architecture
+
+```
+┌──────────────────────┐        ┌──────────────────────┐
+│  ci-controller       │        │  ci-server           │
+│  (Singleton)         │        │  (Multi-replica)     │
+│                      │        │                      │
+│  1. Init DB schema   │        │  1. Connect to DB    │
+│  2. Start reconcile  │        │  2. Serve HTTP API   │
+│     loop             │        │  3. Write jobs to DB │
+│  3. Execute jobs     │        │                      │
+└──────┬───────────────┘        └──────┬───────────────┘
+       │                               │
+       └───────────┬───────────────────┘
+                   │
+           ┌───────▼────────┐
+           │  SQLite DB     │
+           │  (Shared State)│
+           └────────────────┘
+```
+
+### Health Checks
+
+The controller doesn't expose HTTP endpoints. Monitor health via:
+- Process status (is it running?)
+- Database activity (are jobs progressing?)
+- Docker container creation (are containers being spawned?)
+- Log output (check for reconciliation cycles)
 
 ### Submitting Jobs
 

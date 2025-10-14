@@ -77,18 +77,53 @@ ci list
 ci list --json
 ```
 
-## Running the Server
+## Running the System
 
-Start the CI server:
+The CI system consists of two independent services that work together:
+
+### 1. Start the Controller (Required, Singleton)
+
+The controller executes jobs and must be started first:
 
 ```bash
+# Run with default settings
+ci-controller
+
+# Or with custom configuration
+ci-controller --db-path /path/to/ci_jobs.db --interval 2.0
+```
+
+The controller will:
+- Initialize the database schema (create tables if needed)
+- Watch for new jobs in the database
+- Execute jobs in Docker containers
+- Update job status as they progress
+
+### 2. Start the Server (Can be Multi-Replica)
+
+Once the controller is running, start one or more server instances:
+
+```bash
+# Single server instance
 python -m uvicorn ci_server.app:app --port 8000
+
+# Multiple replicas for high availability
+python -m uvicorn ci_server.app:app --port 8000 &
+python -m uvicorn ci_server.app:app --port 8001 &
+python -m uvicorn ci_server.app:app --port 8002 &
 ```
 
-**Custom Database Path:**
+**Environment Variables:**
 ```bash
-CI_DB_PATH=/path/to/custom.db python -m uvicorn ci_server.app:app --port 8000
+# Shared by both services
+export CI_DB_PATH=/path/to/ci_jobs.db
+
+# Controller-specific
+export CI_CONTAINER_PREFIX=ci_prod_
+export CI_RECONCILE_INTERVAL=2.0
 ```
+
+**Important:** The controller must be running for jobs to execute. The server only accepts job submissions via HTTP API.
 
 Jobs are persisted to the SQLite database and survive server restarts.
 
