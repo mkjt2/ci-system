@@ -119,8 +119,6 @@ def get_container_manager() -> ContainerManager:
     return container_manager
 
 
-
-
 async def process_job_async(job_id: str, zip_data: bytes) -> None:
     """
     Process a job asynchronously and store output in job store.
