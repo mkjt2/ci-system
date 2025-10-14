@@ -4,11 +4,14 @@ A simple CI system for Python projects that runs tests in isolated Docker contai
 
 ## Features
 
+- **API Key Authentication**: Secure access with user-based API keys
+- **User Management**: Admin CLI for managing users and API keys
 - **Simple CLI**: Submit test jobs with a single command
 - **Async Mode**: Submit jobs in background and check results later
 - **Docker Isolation**: Tests run in clean Python containers
 - **Real-time Streaming**: See test output as it happens via Server-Sent Events
 - **Job Management**: Track and reconnect to running jobs by ID
+- **User Isolation**: Users can only see and access their own jobs
 - **Easy Setup**: Minimal configuration required
 
 ## Installation
@@ -16,6 +19,93 @@ A simple CI system for Python projects that runs tests in isolated Docker contai
 ```bash
 pip install -e .
 ```
+
+## Authentication Setup
+
+The CI system uses API key authentication to secure access and isolate jobs between users.
+
+### 1. Create a User
+
+Use the admin CLI to create a user account:
+
+```bash
+ci-admin user create --name "Your Name" --email "you@example.com"
+# Output: ✓ User created successfully
+#         ID:    a1b2c3d4-e5f6-7890-abcd-ef1234567890
+#         Name:  Your Name
+#         Email: you@example.com
+```
+
+### 2. Create an API Key
+
+Generate an API key for the user:
+
+```bash
+ci-admin key create --email "you@example.com" --name "My Dev Key"
+# Output: ✓ API key created successfully
+#
+#         API Key: ci_abc123def456ghi789...
+#         Name:    My Dev Key
+#         User:    you@example.com
+#
+#         ⚠️  IMPORTANT: This is the only time you'll see this key!
+#            Save it securely now.
+```
+
+### 3. Configure the Client
+
+You can provide your API key in three ways (in priority order):
+
+#### Option 1: Command Line Flag (highest priority)
+```bash
+ci submit test --api-key "ci_abc123def456ghi789..."
+```
+
+#### Option 2: Environment Variable
+```bash
+export CI_API_KEY="ci_abc123def456ghi789..."
+ci submit test
+```
+
+#### Option 3: Config File
+```bash
+mkdir -p ~/.ci
+echo "api_key=ci_abc123def456ghi789..." > ~/.ci/config
+ci submit test
+```
+
+### User Management Commands
+
+```bash
+# List all users
+ci-admin user list
+
+# Get user details
+ci-admin user get --email "you@example.com"
+
+# Deactivate a user
+ci-admin user deactivate <user-id>
+
+# Reactivate a user
+ci-admin user activate <user-id>
+```
+
+### API Key Management Commands
+
+```bash
+# List all API keys for a user
+ci-admin key list --email "you@example.com"
+
+# List all API keys (requires admin)
+ci-admin key list
+
+# Revoke an API key
+ci-admin key revoke <key-id>
+```
+
+### User Isolation
+
+Each user can only see and access their own jobs. Jobs submitted with one API key are not visible to users with different API keys.
 
 ## Usage
 
@@ -166,18 +256,28 @@ Each worker runs tests independently with isolated server ports (8001, 8002, etc
 ## Architecture
 
 - **Client** (`ci_client/`): CLI tool that zips projects and submits to server
-  - `cli.py`: CLI commands (`submit`, `wait`, `list`)
-  - `client.py`: HTTP client with sync/async submission and SSE streaming
+  - `cli.py`: CLI commands (`submit`, `wait`, `list`) with API key support
+  - `client.py`: HTTP client with sync/async submission, SSE streaming, and Bearer token auth
 - **Server** (`ci_server/`): FastAPI app that runs pytest in Docker containers
-  - `app.py`: REST API endpoints with persistent job storage
+  - `app.py`: REST API endpoints with authentication middleware
+  - `auth.py`: API key generation, hashing, and validation
   - `executor.py`: Docker execution with streaming output
   - `repository.py`: Abstract interface for job persistence
   - `sqlite_repository.py`: SQLite implementation (default)
-  - `models.py`: Data models for jobs and events
+  - `models.py`: Data models for jobs, events, users, and API keys
+- **Admin CLI** (`ci_admin/`): User and API key management
+  - `cli.py`: Commands for creating/managing users and API keys
+- **Common** (`ci_common/`): Shared models and interfaces
+  - `models.py`: User, APIKey, Job, and JobEvent models
+  - `repository.py`: Abstract repository interface with user management
+- **Persistence** (`ci_persistence/`): Database implementations
+  - `sqlite_repository.py`: SQLite with users, api_keys, and jobs tables
 - **Communication**: Server-Sent Events for real-time output streaming
+- **Authentication**: HTTPBearer with API key validation and SHA-256 hashing
 - **Job Storage**: SQLite database (persistent across server restarts)
   - Default location: `ci_jobs.db`
   - Configurable via `CI_DB_PATH` environment variable
+  - Schema: users, api_keys, jobs, job_events tables
   - Ready for PostgreSQL/MySQL migration if needed
 
 ## Requirements

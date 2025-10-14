@@ -9,6 +9,8 @@ This module provides the HTTP interface for the CI system, enabling clients to:
 - Stream real-time logs via Server-Sent Events (SSE)
 - Query job status and history
 - List all jobs with filtering
+- Authenticate using API keys
+- Isolate jobs by user
 
 The server is a **stateless HTTP API** that writes jobs to the database. Job execution is handled by the separate `ci-controller` service.
 
@@ -68,7 +70,16 @@ This separation allows:
 
 ### `app.py`
 
-Main FastAPI application with endpoint definitions.
+Main FastAPI application with endpoint definitions and authentication middleware.
+
+### `auth.py`
+
+Authentication module providing:
+- **API Key Generation**: Creates cryptographically secure keys with 240-bit entropy
+- **Key Hashing**: SHA-256 hashing for secure storage
+- **Authentication**: HTTPBearer scheme with database validation
+- **User Validation**: Checks user and key activation status
+- **Last Used Tracking**: Updates key usage timestamps
 
 #### Lifecycle Management
 
@@ -104,11 +115,20 @@ async def lifespan(app: FastAPI):
 
 #### API Endpoints
 
+**Authentication**: All endpoints require Bearer token authentication via the `Authorization` header.
+
+```bash
+Authorization: Bearer ci_abc123def456ghi789...
+```
+
+Jobs are automatically associated with the authenticated user and isolated (users can only see their own jobs).
+
 ### POST `/submit`
 
 Submit job and stream results in real-time (synchronous mode).
 
 **Request:**
+- Headers: `Authorization: Bearer <api_key>`
 - Content-Type: `multipart/form-data`
 - Body: `file` - Project zip file
 
@@ -128,6 +148,7 @@ data: {"type": "complete", "success": true}
 **Example:**
 ```bash
 curl -N -X POST http://localhost:8000/submit \
+  -H "Authorization: Bearer ci_abc123def456ghi789..." \
   -F "file=@project.zip"
 ```
 
@@ -151,6 +172,7 @@ This enables clients to display the job ID so users can reconnect from another t
 Submit job asynchronously and return job ID immediately.
 
 **Request:**
+- Headers: `Authorization: Bearer <api_key>`
 - Content-Type: `multipart/form-data`
 - Body: `file` - Project zip file
 
@@ -164,6 +186,7 @@ Submit job asynchronously and return job ID immediately.
 **Example:**
 ```bash
 curl -X POST http://localhost:8000/submit-async \
+  -H "Authorization: Bearer ci_abc123def456ghi789..." \
   -F "file=@project.zip"
 # {"job_id":"550e8400-e29b-41d4-a716-446655440000"}
 ```
@@ -171,6 +194,9 @@ curl -X POST http://localhost:8000/submit-async \
 ### GET `/jobs/{job_id}/stream`
 
 Stream logs for a specific job via SSE.
+
+**Request:**
+- Headers: `Authorization: Bearer <api_key>`
 
 **Query Parameters:**
 - `from_beginning` (bool): If true, stream all logs. If false (default), only stream new logs.
@@ -189,15 +215,20 @@ Stream logs for a specific job via SSE.
 **Example:**
 ```bash
 # Only show new logs (forward-only mode)
-curl -N http://localhost:8000/jobs/550e8400-e29b-41d4-a716-446655440000/stream
+curl -N http://localhost:8000/jobs/550e8400-e29b-41d4-a716-446655440000/stream \
+  -H "Authorization: Bearer ci_abc123def456ghi789..."
 
 # Show all logs from beginning
-curl -N http://localhost:8000/jobs/550e8400-e29b-41d4-a716-446655440000/stream?from_beginning=true
+curl -N http://localhost:8000/jobs/550e8400-e29b-41d4-a716-446655440000/stream?from_beginning=true \
+  -H "Authorization: Bearer ci_abc123def456ghi789..."
 ```
 
 ### GET `/jobs/{job_id}`
 
 Get job status and metadata (non-streaming).
+
+**Request:**
+- Headers: `Authorization: Bearer <api_key>`
 
 **Response:**
 ```json
@@ -212,12 +243,16 @@ Get job status and metadata (non-streaming).
 
 **Example:**
 ```bash
-curl http://localhost:8000/jobs/550e8400-e29b-41d4-a716-446655440000
+curl http://localhost:8000/jobs/550e8400-e29b-41d4-a716-446655440000 \
+  -H "Authorization: Bearer ci_abc123def456ghi789..."
 ```
 
 ### GET `/jobs`
 
-List all jobs with metadata.
+List all jobs for the authenticated user.
+
+**Request:**
+- Headers: `Authorization: Bearer <api_key>`
 
 **Response:**
 ```json
@@ -241,8 +276,11 @@ List all jobs with metadata.
 
 **Example:**
 ```bash
-curl http://localhost:8000/jobs
+curl http://localhost:8000/jobs \
+  -H "Authorization: Bearer ci_abc123def456ghi789..."
 ```
+
+**Note:** Users can only see jobs they created (user isolation).
 
 ### `executor.py`
 
@@ -298,17 +336,22 @@ CI_DB_PATH=test2.db CI_CONTAINER_PREFIX=test2_ uvicorn ci_server.app:app --port 
 ```bash
 cd /path/to/your/project
 zip -r project.zip . -x '.*' -x '__pycache__/*'
-curl -N -X POST http://localhost:8000/submit -F "file=@project.zip"
+curl -N -X POST http://localhost:8000/submit \
+  -H "Authorization: Bearer ci_abc123def456ghi789..." \
+  -F "file=@project.zip"
 ```
 
 **Asynchronous submission:**
 ```bash
 zip -r project.zip . -x '.*' -x '__pycache__/*'
-JOB_ID=$(curl -X POST http://localhost:8000/submit-async -F "file=@project.zip" | jq -r .job_id)
+JOB_ID=$(curl -X POST http://localhost:8000/submit-async \
+  -H "Authorization: Bearer ci_abc123def456ghi789..." \
+  -F "file=@project.zip" | jq -r .job_id)
 echo "Job ID: $JOB_ID"
 
 # Wait for completion
-curl -N http://localhost:8000/jobs/$JOB_ID/stream?from_beginning=true
+curl -N http://localhost:8000/jobs/$JOB_ID/stream?from_beginning=true \
+  -H "Authorization: Bearer ci_abc123def456ghi789..."
 ```
 
 ### Integration with CI Client
@@ -316,7 +359,12 @@ curl -N http://localhost:8000/jobs/$JOB_ID/stream?from_beginning=true
 ```python
 from ci_client.client import submit_tests_streaming
 
-for event in submit_tests_streaming(Path.cwd(), server_url="http://localhost:8000"):
+api_key = "ci_abc123def456ghi789..."
+for event in submit_tests_streaming(
+    Path.cwd(),
+    server_url="http://localhost:8000",
+    api_key=api_key
+):
     if event["type"] == "log":
         print(event["data"], end="")
     elif event["type"] == "complete":
@@ -447,7 +495,9 @@ pytest tests/e2e/ -v
 
 | Status Code | Scenario |
 |-------------|----------|
-| 404 | Job ID not found |
+| 401 | Missing or invalid authentication token |
+| 403 | User inactive or API key revoked |
+| 404 | Job ID not found or belongs to different user |
 | 500 | Internal server error (logged) |
 
 ### Streaming Errors
@@ -463,11 +513,15 @@ pytest tests/e2e/ -v
 
 ## Security Considerations
 
-1. **File Upload Size**: No limit currently - add middleware for production
-2. **Rate Limiting**: Not implemented - add for production
-3. **Authentication**: None - add JWT/OAuth for production
+1. **Authentication**: API key-based authentication with SHA-256 hashing implemented
+   - 240-bit entropy keys (`ci_` prefix + 40 characters)
+   - Keys hashed before storage
+   - User isolation enforced at database level
+2. **File Upload Size**: No limit currently - add middleware for production
+3. **Rate Limiting**: Not implemented - add for production
 4. **Input Validation**: Zip files are extracted without scanning - add virus scanning
 5. **Resource Limits**: No container resource limits - add CPU/memory caps
+6. **API Key Storage**: Keys shown only once during creation - users must store securely
 
 ## Dependencies
 
@@ -489,14 +543,14 @@ pytest tests/e2e/ -v
 
 1. **No Job Cancellation**: Once submitted, jobs run to completion
 2. **No Resource Limits**: Containers can consume unlimited CPU/memory
-3. **No Authentication**: Anyone can submit jobs
-4. **Single Region**: All operations are local
-5. **No Job Prioritization**: FIFO processing order
+3. **Single Region**: All operations are local
+4. **No Job Prioritization**: FIFO processing order
+5. **No Role-Based Access Control**: All authenticated users have same permissions
 
 ## Future Enhancements
 
 - [ ] Job cancellation endpoint (DELETE /jobs/{job_id})
-- [ ] Authentication and authorization (JWT tokens)
+- [ ] Role-based access control (admin, developer, viewer roles)
 - [ ] Rate limiting per user/IP
 - [ ] Container resource limits (CPU, memory)
 - [ ] Job prioritization (priority queue)
@@ -507,3 +561,4 @@ pytest tests/e2e/ -v
 - [ ] Pagination for job listings
 - [ ] Filtering and search for jobs
 - [ ] Job artifacts storage (test reports, coverage)
+- [ ] API key rotation and expiration policies

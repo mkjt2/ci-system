@@ -9,7 +9,11 @@ This module provides two interfaces for the CI system:
 1. **CLI Tool** (`cli.py`): User-facing command-line interface for submitting jobs and viewing results
 2. **Client Library** (`client.py`): Python API for programmatic interaction
 
-Both interfaces handle project packaging, HTTP communication, and Server-Sent Events (SSE) parsing.
+Both interfaces handle:
+- API key authentication (via CLI flag, environment variable, or config file)
+- Project packaging (zip creation)
+- HTTP communication with Bearer token authentication
+- Server-Sent Events (SSE) parsing for real-time log streaming
 
 ## Architecture
 
@@ -47,6 +51,42 @@ Both interfaces handle project packaging, HTTP communication, and Server-Sent Ev
               └───────────────┘
 ```
 
+## Authentication
+
+All CLI commands require authentication with an API key. You can provide the API key in three ways (in priority order):
+
+### Option 1: Command Line Flag (Highest Priority)
+```bash
+ci submit test --api-key "ci_abc123def456ghi789..."
+```
+
+### Option 2: Environment Variable
+```bash
+export CI_API_KEY="ci_abc123def456ghi789..."
+ci submit test
+```
+
+### Option 3: Config File
+```bash
+mkdir -p ~/.ci
+echo "api_key=ci_abc123def456ghi789..." > ~/.ci/config
+ci submit test
+```
+
+**Creating an API Key:**
+
+Use the admin CLI to create a user and API key:
+```bash
+# Create user
+ci-admin user create --name "Your Name" --email "you@example.com"
+
+# Create API key
+ci-admin key create --email "you@example.com" --name "My Dev Key"
+# Output: ci_abc123def456ghi789...
+```
+
+See the [ci_admin README](../ci_admin/README.md) for more details on user and key management.
+
 ## CLI Commands
 
 ### `ci submit test`
@@ -55,15 +95,19 @@ Submit tests and stream results in real-time (synchronous mode).
 
 **Usage:**
 ```bash
-ci submit test
+ci submit test [--api-key <key>]
 ```
 
+**Options:**
+- `--api-key`: API key for authentication (optional if set via environment or config file)
+
 **Behavior:**
-1. Zips current directory (excludes `.` and `__pycache__`)
-2. POSTs to server `/submit-stream` endpoint
-3. Displays job ID to stderr (for reconnection)
-4. Streams logs to stdout in real-time
-5. Exits with code 0 (pass) or 1 (fail)
+1. Authenticates with API key (from CLI flag, env var, or config file)
+2. Zips current directory (excludes `.` and `__pycache__`)
+3. POSTs to server `/submit-stream` endpoint with Bearer token
+4. Displays job ID to stderr (for reconnection)
+5. Streams logs to stdout in real-time
+6. Exits with code 0 (pass) or 1 (fail)
 
 **Example:**
 ```bash
@@ -88,14 +132,18 @@ Submit tests asynchronously and return job ID immediately.
 
 **Usage:**
 ```bash
-ci submit test --async
+ci submit test --async [--api-key <key>]
 ```
 
+**Options:**
+- `--api-key`: API key for authentication (optional if set via environment or config file)
+
 **Behavior:**
-1. Zips current directory
-2. POSTs to server `/submit-async` endpoint
-3. Prints job ID to stdout
-4. Exits immediately with code 0
+1. Authenticates with API key
+2. Zips current directory
+3. POSTs to server `/submit-async` endpoint with Bearer token
+4. Prints job ID to stdout
+5. Exits immediately with code 0
 
 **Example:**
 ```bash
@@ -115,11 +163,12 @@ Wait for job completion and stream logs (forward-only by default).
 
 **Usage:**
 ```bash
-ci wait <job_id> [--all]
+ci wait <job_id> [--all] [--api-key <key>]
 ```
 
 **Options:**
 - `--all`: Show all logs from beginning (default: only show new logs)
+- `--api-key`: API key for authentication (optional if set via environment or config file)
 
 **Behavior:**
 1. Connects to server `/jobs/{job_id}/stream` endpoint
@@ -145,15 +194,18 @@ Press Ctrl+C to stop waiting (exit code 130). Job continues running on server.
 
 ### `ci list`
 
-List all jobs with their status.
+List all jobs for the authenticated user.
 
 **Usage:**
 ```bash
-ci list [--json]
+ci list [--json] [--api-key <key>]
 ```
 
 **Options:**
 - `--json`: Output in JSON format (default: human-readable table)
+- `--api-key`: API key for authentication (optional if set via environment or config file)
+
+**Note:** Users can only see jobs they created (user isolation).
 
 **Table Format:**
 ```bash
@@ -206,25 +258,30 @@ zip_data = create_project_zip(Path("/path/to/project"))
 print(f"Zip size: {len(zip_data)} bytes")
 ```
 
-### `submit_tests_streaming(project_dir: Path, server_url: str) -> Generator[dict, None, None]`
+### `submit_tests_streaming(project_dir: Path, server_url: str, api_key: str | None) -> Generator[dict, None, None]`
 
 Submit tests and stream events via Server-Sent Events.
 
 **Parameters:**
 - `project_dir`: Path to project root
 - `server_url`: CI server URL (default: `http://localhost:8000`)
+- `api_key`: API key for authentication (optional, defaults to None)
 
 **Yields:**
 - `{"type": "job_id", "job_id": str}` - Job identifier
 - `{"type": "log", "data": str}` - Log output
 - `{"type": "complete", "success": bool}` - Completion status
 
+**Raises:**
+- `RuntimeError`: If authentication fails (401/403) or submission fails
+
 **Example:**
 ```python
 from pathlib import Path
 from ci_client.client import submit_tests_streaming
 
-for event in submit_tests_streaming(Path.cwd()):
+api_key = "ci_abc123def456ghi789..."
+for event in submit_tests_streaming(Path.cwd(), api_key=api_key):
     if event["type"] == "job_id":
         print(f"Job ID: {event['job_id']}")
     elif event["type"] == "log":
@@ -236,85 +293,101 @@ for event in submit_tests_streaming(Path.cwd()):
             print("Tests failed!")
 ```
 
-### `submit_tests_async(project_dir: Path, server_url: str) -> str`
+### `submit_tests_async(project_dir: Path, server_url: str, api_key: str | None) -> str`
 
 Submit tests asynchronously and get job ID immediately.
 
 **Parameters:**
 - `project_dir`: Path to project root
 - `server_url`: CI server URL (default: `http://localhost:8000`)
+- `api_key`: API key for authentication (optional, defaults to None)
 
 **Returns:**
 - `str`: Job ID (UUID)
 
 **Raises:**
-- `RuntimeError`: If submission fails
+- `RuntimeError`: If authentication fails (401/403) or submission fails
 
 **Example:**
 ```python
 from pathlib import Path
 from ci_client.client import submit_tests_async, wait_for_job
 
+api_key = "ci_abc123def456ghi789..."
+
 # Submit job
-job_id = submit_tests_async(Path.cwd())
+job_id = submit_tests_async(Path.cwd(), api_key=api_key)
 print(f"Job submitted: {job_id}")
 
 # Do other work...
 
 # Wait for completion
-for event in wait_for_job(job_id, from_beginning=True):
+for event in wait_for_job(job_id, api_key=api_key, from_beginning=True):
     if event["type"] == "log":
         print(event["data"], end="")
     elif event["type"] == "complete":
         success = event["success"]
 ```
 
-### `wait_for_job(job_id: str, server_url: str, from_beginning: bool) -> Generator[dict, None, None]`
+### `wait_for_job(job_id: str, server_url: str, api_key: str | None, from_beginning: bool) -> Generator[dict, None, None]`
 
 Stream logs for a specific job via SSE.
 
 **Parameters:**
 - `job_id`: Job UUID
 - `server_url`: CI server URL (default: `http://localhost:8000`)
+- `api_key`: API key for authentication (optional, defaults to None)
 - `from_beginning`: If True, stream all logs. If False (default), only new logs.
 
 **Yields:**
 - `{"type": "log", "data": str}` - Log output
 - `{"type": "complete", "success": bool}` - Completion status
 
+**Raises:**
+- `RuntimeError`: If authentication fails (401/403) or job not found
+
 **Example:**
 ```python
 from ci_client.client import wait_for_job
 
+api_key = "ci_abc123def456ghi789..."
+
 # Only show new logs (forward-only)
-for event in wait_for_job("550e8400-e29b-41d4-a716-446655440000"):
+for event in wait_for_job("550e8400-e29b-41d4-a716-446655440000", api_key=api_key):
     if event["type"] == "log":
         print(event["data"], end="")
 
 # Show all logs from beginning
-for event in wait_for_job("550e8400-e29b-41d4-a716-446655440000", from_beginning=True):
+for event in wait_for_job(
+    "550e8400-e29b-41d4-a716-446655440000",
+    api_key=api_key,
+    from_beginning=True
+):
     if event["type"] == "log":
         print(event["data"], end="")
 ```
 
-### `list_jobs(server_url: str) -> list[dict]`
+### `list_jobs(server_url: str, api_key: str | None) -> list[dict]`
 
-Fetch all jobs from the server.
+Fetch all jobs for the authenticated user.
 
 **Parameters:**
 - `server_url`: CI server URL (default: `http://localhost:8000`)
+- `api_key`: API key for authentication (optional, defaults to None)
 
 **Returns:**
 - List of job dictionaries with keys: `job_id`, `status`, `success`, `start_time`, `end_time`
+- Only returns jobs created by the authenticated user (user isolation)
 
 **Raises:**
-- `RuntimeError`: If request fails
+- `RuntimeError`: If authentication fails (401/403) or request fails
 
 **Example:**
 ```python
 from ci_client.client import list_jobs
 
-jobs = list_jobs()
+api_key = "ci_abc123def456ghi789..."
+jobs = list_jobs(api_key=api_key)
 for job in jobs:
     print(f"{job['job_id']}: {job['status']} (success={job['success']})")
 ```
@@ -326,12 +399,25 @@ for job in jobs:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `CI_SERVER_URL` | CI server base URL | `http://localhost:8000` |
+| `CI_API_KEY` | API key for authentication | None (required) |
 
 **Example:**
 ```bash
 export CI_SERVER_URL=http://ci-server.example.com:8000
+export CI_API_KEY=ci_abc123def456ghi789...
 ci submit test
 ```
+
+### Config File
+
+You can store your API key in `~/.ci/config`:
+
+```bash
+mkdir -p ~/.ci
+echo "api_key=ci_abc123def456ghi789..." > ~/.ci/config
+```
+
+The config file format is simple key-value pairs, one per line.
 
 ## Installation
 
@@ -422,6 +508,29 @@ ci list
 
 ## Error Handling
 
+### Authentication Errors
+
+**Missing API Key:**
+```
+Error: Authentication failed: API key is required. Set CI_API_KEY environment variable, use --api-key flag, or configure in ~/.ci/config
+```
+
+**Solution:** Configure API key using one of the three methods (see Authentication section).
+
+**Invalid API Key:**
+```
+Error: Authentication failed: 401 Unauthorized
+```
+
+**Solution:** Verify your API key is correct. Contact admin to check if key is revoked or user is inactive.
+
+**User Inactive:**
+```
+Error: Authentication failed: 403 Forbidden
+```
+
+**Solution:** Contact admin to reactivate your user account.
+
 ### Network Errors
 
 If the server is unreachable:
@@ -447,7 +556,7 @@ The job continues running on the server. Use `ci wait <job_id>` to reconnect.
 Error: Error waiting for job: 404 Client Error: Not Found for url...
 ```
 
-**Solution:** Check job ID is correct using `ci list`.
+**Solution:** Check job ID is correct using `ci list`. Note that you can only access jobs you created (user isolation).
 
 ## Testing
 
@@ -495,6 +604,7 @@ pytest tests/e2e/ -v
 3. **No Connection Pooling**: Each command creates new connection
 4. **No Job Filtering**: `ci list` shows all jobs (no search/filter)
 5. **No Cancellation**: Can't cancel jobs from client
+6. **No Key Rotation Reminders**: No warnings when API keys are old
 
 ## Future Enhancements
 
@@ -505,6 +615,7 @@ pytest tests/e2e/ -v
 - [ ] Job cancellation (`ci cancel <job_id>`)
 - [ ] Colorized output for better readability
 - [ ] Watch mode (`ci watch <job_id>`) with auto-reconnect
-- [ ] Configuration file (`~/.ci/config.yaml`)
 - [ ] Shell completion (bash, zsh, fish)
 - [ ] TUI (Terminal User Interface) for interactive job management
+- [ ] API key rotation reminders and expiration warnings
+- [ ] Support for multiple server profiles in config file

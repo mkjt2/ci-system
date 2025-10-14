@@ -12,6 +12,45 @@ This module contains the core domain objects and abstract interfaces that define
 
 Domain objects representing the CI system's core entities:
 
+#### `User`
+Represents a user account with authentication and authorization metadata.
+
+```python
+@dataclass
+class User:
+    id: str                      # Unique user identifier (UUID)
+    name: str                    # Display name
+    email: str                   # Email address (unique)
+    created_at: datetime         # Account creation timestamp
+    is_active: bool              # Whether user can authenticate
+```
+
+**Methods:**
+- `to_dict()`: Serialize to dictionary for JSON responses
+
+#### `APIKey`
+Represents an API key for user authentication.
+
+```python
+@dataclass
+class APIKey:
+    id: str                      # Unique key identifier (UUID)
+    user_id: str                 # Owner user ID
+    name: str                    # Key description/name
+    key_hash: str                # SHA-256 hash of the key
+    created_at: datetime         # Key creation timestamp
+    last_used_at: datetime | None # Last authentication timestamp
+    is_active: bool              # Whether key can authenticate
+```
+
+**Methods:**
+- `to_dict()`: Serialize to dictionary (excludes key_hash for security)
+
+**Security Notes:**
+- API keys are never stored in plaintext (only SHA-256 hashes)
+- Keys use 240-bit entropy with `ci_` prefix
+- Keys are shown only once during creation
+
 #### `JobEvent`
 Represents a single event in a job's lifecycle (logs, completion, errors).
 
@@ -35,6 +74,7 @@ Represents a CI test job with metadata and execution history.
 @dataclass
 class Job:
     id: str                      # Unique job identifier (UUID)
+    user_id: str                 # Owner user ID (for isolation)
     status: str                  # "queued", "running", "completed", "failed", "cancelled"
     events: list[JobEvent]       # Historical events (mostly unused in controller pattern)
     success: bool | None         # Final result (True=pass, False=fail, None=in-progress)
@@ -43,6 +83,11 @@ class Job:
     container_id: str | None     # Docker container ID
     zip_file_path: str | None    # Path to stashed project zip file
 ```
+
+**User Isolation:**
+- Each job is associated with a user via `user_id`
+- Users can only access their own jobs
+- Enforced at both database and API levels
 
 **Job Lifecycle:**
 ```
@@ -60,14 +105,34 @@ queued → running → completed (success=True/False)
 Abstract base class defining the persistence interface.
 
 #### `JobRepository` (ABC)
-Provides a database-agnostic interface for job storage and retrieval.
+Provides a database-agnostic interface for job storage, retrieval, and user management.
 
-**Core Operations:**
+**User Management:**
+```python
+async def create_user(user: User) -> None
+async def get_user(user_id: str) -> User | None
+async def get_user_by_email(email: str) -> User | None
+async def list_users() -> list[User]
+async def update_user_active(user_id: str, is_active: bool) -> None
+```
+
+**API Key Management:**
+```python
+async def create_api_key(api_key: APIKey) -> None
+async def get_api_key_by_hash(key_hash: str) -> APIKey | None
+async def list_api_keys(user_id: str | None = None) -> list[APIKey]
+async def revoke_api_key(key_id: str) -> None
+async def update_api_key_last_used(key_id: str, timestamp: datetime) -> None
+```
+
+**Job Operations:**
 ```python
 async def create_job(job: Job) -> None
-async def get_job(job_id: str) -> Job | None
-async def list_jobs() -> list[Job]
+async def get_job(job_id: str, user_id: str | None = None) -> Job | None
+async def list_jobs(user_id: str | None = None) -> list[Job]
 ```
+
+**Note:** Job operations now support optional `user_id` parameter for user isolation.
 
 **State Management:**
 ```python
