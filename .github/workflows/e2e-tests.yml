@@ -1,4 +1,4 @@
-name: E2E Tests
+name: CI
 
 on:
   push:
@@ -8,7 +8,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  e2e-tests:
+  lint-and-typecheck:
+    name: Lint & Type Check
     runs-on: ubuntu-latest
 
     steps:
@@ -27,13 +28,52 @@ jobs:
           pip install pyright ruff
 
       - name: Run ruff linting
-        run: ruff check ci_server/ ci_client/ tests/ setup.py
+        run: ruff check ci_common/ ci_persistence/ ci_controller/ ci_server/ ci_client/ tests/ setup.py
 
       - name: Run ruff format check
-        run: ruff format --check ci_server/ ci_client/ tests/unit/ tests/e2e/ setup.py
+        run: ruff format --check ci_common/ ci_persistence/ ci_controller/ ci_server/ ci_client/ tests/unit/ tests/e2e/ setup.py
 
       - name: Run type checking
         run: pyright
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run unit tests
+        run: pytest tests/unit/ -v
+
+  e2e-tests:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
 
       - name: Run E2E tests
         run: pytest tests/e2e/ -v
