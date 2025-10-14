@@ -8,6 +8,7 @@ Can be easily replaced with PostgreSQL/MySQL implementations.
 from datetime import datetime
 
 import aiosqlite
+
 from ci_common.models import Job, JobEvent
 from ci_common.repository import JobRepository
 

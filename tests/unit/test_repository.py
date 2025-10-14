@@ -10,6 +10,7 @@ import tempfile
 from datetime import datetime
 
 import pytest
+
 from ci_common.models import Job, JobEvent
 from ci_persistence.sqlite_repository import SQLiteJobRepository
 

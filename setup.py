@@ -34,6 +34,7 @@ setup(
     entry_points={
         "console_scripts": [
             "ci=ci_client.cli:main",
+            "ci-controller=ci_controller.__main__:main",
         ],
     },
     python_requires=">=3.8",
