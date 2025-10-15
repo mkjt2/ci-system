@@ -5,19 +5,17 @@ import os
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from datetime import datetime
 from typing import Any
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
-from ci_common.models import Job, JobEvent, User
+from ci_common.models import Job, User
 from ci_common.repository import JobRepository
 from ci_controller.container_manager import ContainerManager
 from ci_persistence.sqlite_repository import SQLiteJobRepository
 
 from .auth import create_get_current_user_dependency
-from .executor import run_tests_in_docker_streaming
 
 # Configure logging
 logging.basicConfig(
@@ -122,49 +120,6 @@ def get_container_manager() -> ContainerManager:
 
 # Create authentication dependency
 get_current_user = create_get_current_user_dependency(get_repository)
-
-
-async def process_job_async(job_id: str, zip_data: bytes) -> None:
-    """
-    Process a job asynchronously and store output in job store.
-
-    Args:
-        job_id: UUID of the job to process
-        zip_data: Zipped project data to test
-
-    This function runs in the background and updates the job store
-    with events as they occur during test execution.
-    """
-    repo = get_repository()
-
-    # Update job status to running
-    await repo.update_job_status(job_id, "running", start_time=datetime.utcnow())
-
-    try:
-        # Stream events from Docker execution and store them
-        async for event_dict in run_tests_in_docker_streaming(zip_data):
-            # Convert dict to JobEvent and store
-            event = JobEvent.from_dict(event_dict, timestamp=datetime.utcnow())
-            await repo.add_event(job_id, event)
-
-            # If this is a completion event, mark job as completed
-            if event.type == "complete":
-                await repo.complete_job(
-                    job_id, success=event.success or False, end_time=datetime.utcnow()
-                )
-    except Exception as e:
-        # Handle any unexpected errors during job processing
-        error_event = JobEvent(
-            type="log", data=f"Error: {e}\n", timestamp=datetime.utcnow()
-        )
-        await repo.add_event(job_id, error_event)
-
-        complete_event = JobEvent(
-            type="complete", success=False, timestamp=datetime.utcnow()
-        )
-        await repo.add_event(job_id, complete_event)
-
-        await repo.complete_job(job_id, success=False, end_time=datetime.utcnow())
 
 
 async def create_job_from_upload(

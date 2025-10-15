@@ -6,7 +6,7 @@ These tests use pytest with asyncio support to test container management operati
 
 import pytest
 
-from ci_server.container_manager import ContainerManager
+from ci_controller.container_manager import ContainerManager
 
 
 class TestContainerManager:
