@@ -136,6 +136,9 @@ class JobController:
             # 4. Clean up orphaned containers (containers without jobs)
             await self._cleanup_orphaned_containers(containers, jobs)
 
+            # 5. Clean up orphaned zip files (zip files for completed/failed jobs)
+            await self._cleanup_orphaned_zip_files(jobs)
+
         except Exception as e:
             logger.error(f"Error in reconciliation cycle: {e}", exc_info=True)
 
@@ -276,6 +279,19 @@ class JobController:
                 f"Job {job_id} started successfully with container {container_id}"
             )
 
+            # Clean up the zip file now that container is created
+            # The container has all the files it needs from the temp_dir
+            try:
+                import os
+
+                os.unlink(job.zip_file_path)
+                logger.info(f"Cleaned up zip file for job {job_id}: {job.zip_file_path}")
+            except Exception as cleanup_error:
+                # Log but don't fail the job - cleanup is best-effort
+                logger.warning(
+                    f"Failed to clean up zip file for job {job_id}: {cleanup_error}"
+                )
+
         except Exception as e:
             logger.error(f"Failed to start job {job_id}: {e}", exc_info=True)
             await self._mark_job_failed(job_id, f"Failed to start container: {e}")
@@ -346,6 +362,24 @@ class JobController:
 
             logger.info(f"Job {job_id} marked as failed: {reason}")
 
+            # Clean up the zip file if it still exists
+            try:
+                import os
+
+                job = await self.repository.get_job(job_id)
+                if job and job.zip_file_path:
+                    zip_path = Path(job.zip_file_path)
+                    if zip_path.exists():
+                        os.unlink(job.zip_file_path)
+                        logger.info(
+                            f"Cleaned up zip file for failed job {job_id}: {job.zip_file_path}"
+                        )
+            except Exception as cleanup_error:
+                # Log but don't propagate - cleanup is best-effort
+                logger.warning(
+                    f"Failed to clean up zip file for failed job {job_id}: {cleanup_error}"
+                )
+
         except Exception as e:
             logger.error(f"Error marking job {job_id} as failed: {e}", exc_info=True)
 
@@ -368,6 +402,40 @@ class JobController:
                     f"(name: {container.name}), cleaning up"
                 )
                 await self.container_manager.cleanup_container(container.name)
+
+    async def _cleanup_orphaned_zip_files(self, jobs: list[Job]) -> None:
+        """
+        Clean up zip files for jobs that are in terminal states.
+
+        This is a safety net that catches any zip files that weren't cleaned up
+        during normal job processing (e.g., due to crashes or errors).
+
+        Args:
+            jobs: All jobs from database
+        """
+        import os
+
+        for job in jobs:
+            # Only clean up zip files for jobs in terminal states
+            if job.status not in ["completed", "failed", "cancelled"]:
+                continue
+
+            # Skip if no zip file path
+            if not job.zip_file_path:
+                continue
+
+            # Check if zip file still exists and clean it up
+            zip_path = Path(job.zip_file_path)
+            if zip_path.exists():
+                try:
+                    os.unlink(job.zip_file_path)
+                    logger.info(
+                        f"Cleaned up orphaned zip file for job {job.id}: {job.zip_file_path}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to clean up orphaned zip file for job {job.id}: {e}"
+                    )
 
     async def register_job(self, job_id: str, temp_dir: Path) -> None:
         """

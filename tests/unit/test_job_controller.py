@@ -227,3 +227,133 @@ class TestJobController:
 
             assert "test-job-id" in controller.active_jobs
             assert controller.active_jobs["test-job-id"] == temp_path
+
+    @pytest.mark.asyncio
+    async def test_zip_cleanup_after_container_start(
+        self, controller, mock_repository, mock_container_manager
+    ):
+        """Test that zip file is cleaned up after container is started."""
+        # Create temp zip file
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as f:
+            zip_file_path = f.name
+
+        try:
+            job = Job(id="test-job-id", status="queued", zip_file_path=zip_file_path)
+            mock_repository.list_jobs.return_value = [job]
+            mock_repository.get_job.return_value = job
+            mock_container_manager.list_ci_containers.return_value = []
+            mock_container_manager.create_container.return_value = (
+                "container-123",
+                Path("/tmp/test"),
+            )
+
+            await controller.reconcile_once()
+
+            # Verify zip file was deleted
+            assert not Path(zip_file_path).exists()
+        finally:
+            # Clean up temp file if test failed
+            import os
+
+            if os.path.exists(zip_file_path):
+                os.unlink(zip_file_path)
+
+    @pytest.mark.asyncio
+    async def test_zip_cleanup_on_job_failure(
+        self, controller, mock_repository, mock_container_manager
+    ):
+        """Test that zip file is cleaned up when job fails."""
+        # Create temp zip file
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as f:
+            zip_file_path = f.name
+
+        try:
+            job = Job(
+                id="test-job-id",
+                status="running",
+                container_id="container-123",
+                zip_file_path=zip_file_path,
+            )
+            mock_repository.list_jobs.return_value = [job]
+            mock_repository.get_job.return_value = job
+            # Container disappeared - job will be marked as failed
+            mock_container_manager.list_ci_containers.return_value = []
+
+            await controller.reconcile_once()
+
+            # Verify zip file was deleted
+            assert not Path(zip_file_path).exists()
+        finally:
+            # Clean up temp file if test failed
+            import os
+
+            if os.path.exists(zip_file_path):
+                os.unlink(zip_file_path)
+
+    @pytest.mark.asyncio
+    async def test_cleanup_orphaned_zip_files(
+        self, controller, mock_repository, mock_container_manager
+    ):
+        """Test that orphaned zip files for completed jobs are cleaned up."""
+        # Create temp zip file
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as f:
+            zip_file_path = f.name
+
+        try:
+            # Job is completed but zip file still exists
+            job = Job(
+                id="test-job-id", status="completed", zip_file_path=zip_file_path
+            )
+            mock_repository.list_jobs.return_value = [job]
+            mock_container_manager.list_ci_containers.return_value = []
+
+            await controller.reconcile_once()
+
+            # Verify zip file was cleaned up
+            assert not Path(zip_file_path).exists()
+        finally:
+            # Clean up temp file if test failed
+            import os
+
+            if os.path.exists(zip_file_path):
+                os.unlink(zip_file_path)
+
+    @pytest.mark.asyncio
+    async def test_zip_cleanup_does_not_affect_running_jobs(
+        self, controller, mock_repository, mock_container_manager
+    ):
+        """Test that zip files for running jobs are NOT cleaned up."""
+        # Create temp zip file
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as f:
+            zip_file_path = f.name
+
+        try:
+            # Job is still running
+            job = Job(
+                id="test-job-id",
+                status="running",
+                container_id="container-123",
+                zip_file_path=zip_file_path,
+            )
+            mock_repository.list_jobs.return_value = [job]
+
+            container = ContainerInfo(
+                container_id="container-123",
+                name="test-job-id",
+                status="running",
+                exit_code=None,
+                started_at=datetime.utcnow(),
+                finished_at=None,
+            )
+            mock_container_manager.list_ci_containers.return_value = [container]
+
+            await controller.reconcile_once()
+
+            # Verify zip file still exists (not cleaned up yet)
+            assert Path(zip_file_path).exists()
+        finally:
+            # Clean up temp file
+            import os
+
+            if os.path.exists(zip_file_path):
+                os.unlink(zip_file_path)
