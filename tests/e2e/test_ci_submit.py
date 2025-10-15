@@ -59,9 +59,9 @@ def wait_for_server_ready(proc, port, max_wait=10):
                 f"stderr: {stderr.decode()}"
             )
 
-        # Try to connect
+        # Try to connect (use /health endpoint since /jobs requires auth)
         try:
-            response = requests.get(f"http://localhost:{port}/jobs", timeout=1)
+            response = requests.get(f"http://localhost:{port}/health", timeout=1)
             if response.status_code == 200:
                 return  # Server is ready
         except requests.exceptions.RequestException:
@@ -104,14 +104,45 @@ def controller_process(test_db_path, worker_id, monkeypatch):
         env=env,
     )
 
-    # Wait for controller to initialize (simple wait, controller starts quickly)
-    time.sleep(1)
+    # Wait for controller to initialize the database
+    # Controller logs "Database initialized" when ready
+    max_wait = 5
+    start_time = time.time()
+    while time.time() - start_time < max_wait:
+        # Check if controller crashed
+        if proc.poll() is not None:
+            _, stderr = proc.communicate()
+            raise RuntimeError(
+                f"Controller crashed during startup. stderr: {stderr.decode()}"
+            )
 
-    # Check if controller crashed during startup
-    if proc.poll() is not None:
-        _, stderr = proc.communicate()
+        # Check if database file exists and has tables (controller initialized it)
+        if os.path.exists(test_db_path):
+            # Verify database is initialized by checking if tables exist
+            import sqlite3
+            try:
+                conn = sqlite3.connect(test_db_path)
+                cursor = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='jobs'"
+                )
+                if cursor.fetchone() is not None:
+                    conn.close()
+                    break
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+        time.sleep(0.1)
+    else:
+        # Database not initialized in time
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
         raise RuntimeError(
-            f"Controller crashed during startup. stderr: {stderr.decode()}"
+            f"Controller did not initialize database within {max_wait} seconds"
         )
 
     try:
@@ -127,10 +158,64 @@ def controller_process(test_db_path, worker_id, monkeypatch):
 
 
 @pytest.fixture
-def server_process(test_db_path, worker_id, controller_process, monkeypatch):
+def test_api_key(test_db_path, controller_process):
+    """Create a test user and API key for authentication.
+
+    Note: Depends on controller_process to ensure database is initialized.
+    """
+    # Use ci-admin to create a test user and API key
+    result = subprocess.run(
+        [
+            "ci-admin",
+            "user",
+            "create",
+            "--name",
+            "Test User",
+            "--email",
+            f"test-{SESSION_ID}@example.com",
+        ],
+        env={**os.environ, "CI_DB_PATH": test_db_path},
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to create test user: {result.stderr}")
+
+    # Create an API key for the user
+    result = subprocess.run(
+        [
+            "ci-admin",
+            "key",
+            "create",
+            "--email",
+            f"test-{SESSION_ID}@example.com",
+            "--name",
+            "Test Key",
+        ],
+        env={**os.environ, "CI_DB_PATH": test_db_path},
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to create API key: {result.stderr}")
+
+    # Extract the API key from output (format: "API Key: ci_...")
+    import re
+
+    match = re.search(r"API Key:\s+(ci_[a-zA-Z0-9_-]+)", result.stdout)
+    if not match:
+        raise RuntimeError(f"Could not extract API key from output: {result.stdout}")
+
+    return match.group(1)
+
+
+@pytest.fixture
+def server_process(test_db_path, worker_id, test_api_key, monkeypatch):
     """Start the CI server and tear it down after the test.
 
-    Note: Depends on controller_process to ensure controller starts first.
+    Note: Depends on test_api_key to ensure auth is set up.
     """
     # Use a unique port for each worker to support parallel test execution
     # worker_id is 'master' when not running in parallel, or 'gw0', 'gw1', etc. when parallel
@@ -151,6 +236,7 @@ def server_process(test_db_path, worker_id, controller_process, monkeypatch):
     monkeypatch.setenv("CI_DB_PATH", test_db_path)
     monkeypatch.setenv("CI_SERVER_URL", f"http://localhost:{port}")
     monkeypatch.setenv("CI_CONTAINER_PREFIX", container_prefix)
+    monkeypatch.setenv("CI_API_KEY", test_api_key)
 
     # Start server with environment variables
     env = os.environ.copy()
@@ -221,6 +307,11 @@ def server_process(test_db_path, worker_id, controller_process, monkeypatch):
 def run_ci_test(project_name, *args, env=None):
     """Helper to run ci commands on a fixture project."""
     project = Path(__file__).parent.parent / "fixtures" / project_name
+    # If no env provided, inherit from os.environ (includes CI_API_KEY from monkeypatch)
+    if env is None:
+        env = os.environ.copy()
+
+
     return subprocess.run(
         ["ci", *args],
         cwd=str(project),

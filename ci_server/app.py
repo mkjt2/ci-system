@@ -477,6 +477,17 @@ async def stream_job_logs(
     )
 
 
+@app.get("/health")
+async def health_check() -> dict[str, str]:
+    """
+    Health check endpoint (no authentication required).
+
+    Returns:
+        Dictionary with status="ok" if server is running
+    """
+    return {"status": "ok"}
+
+
 @app.get("/jobs")
 async def list_jobs(
     user: User = Depends(get_current_user),
