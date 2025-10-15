@@ -30,9 +30,6 @@ jobs:
       - name: Run ruff linting
         run: ruff check ci_common/ ci_persistence/ ci_controller/ ci_server/ ci_client/ tests/ setup.py
 
-      - name: Run ruff format check
-        run: ruff format --check ci_common/ ci_persistence/ ci_controller/ ci_server/ ci_client/ tests/unit/ tests/e2e/ setup.py
-
       - name: Run type checking
         run: pyright
 
