@@ -167,6 +167,55 @@ async def process_job_async(job_id: str, zip_data: bytes) -> None:
         await repo.complete_job(job_id, success=False, end_time=datetime.utcnow())
 
 
+async def create_job_from_upload(
+    file: UploadFile, user: User, repo: JobRepository
+) -> tuple[str, Job]:
+    """
+    Create a job from an uploaded zip file.
+
+    This helper function handles the common workflow of:
+    1. Generating a unique job ID
+    2. Reading the uploaded zip file
+    3. Stashing the zip to a temporary location
+    4. Creating a job entry in the database
+
+    Args:
+        file: Uploaded zip file containing the project
+        user: Authenticated user who owns the job
+        repo: Job repository for database operations
+
+    Returns:
+        Tuple of (job_id, job) where job_id is the UUID string and job is the Job object
+
+    Raises:
+        Exception: If file I/O or database operations fail
+    """
+    import tempfile
+
+    job_id = str(uuid.uuid4())
+    zip_data = await file.read()
+
+    # Stash the zip file to a temporary location
+    fd, zip_file_path = tempfile.mkstemp(suffix=".zip", prefix=f"ci_job_{job_id}_")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(zip_data)
+    except Exception:
+        os.close(fd)
+        raise
+
+    # Create job entry in the database with zip file path and user ownership
+    job = Job(
+        id=job_id,
+        status="queued",
+        zip_file_path=zip_file_path,
+        user_id=user.id,
+    )
+    await repo.create_job(job)
+
+    return job_id, job
+
+
 async def stream_job_events(
     job_id: str,
     repo: JobRepository,
@@ -294,28 +343,7 @@ async def submit_job(
     and the controller's reconciliation loop handles container creation
     and execution.
     """
-    import tempfile
-
-    job_id = str(uuid.uuid4())
-    zip_data = await file.read()
-
-    # Stash the zip file to a temporary location
-    fd, zip_file_path = tempfile.mkstemp(suffix=".zip", prefix=f"ci_job_{job_id}_")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(zip_data)
-    except Exception:
-        os.close(fd)
-        raise
-
-    # Create job entry in the database with zip file path and user ownership
-    job = Job(
-        id=job_id,
-        status="queued",
-        zip_file_path=zip_file_path,
-        user_id=user.id,
-    )
-    await repo.create_job(job)
+    job_id, _ = await create_job_from_upload(file, user, repo)
 
     # Controller will pick up the queued job and start it
     # Stream the results as they become available
@@ -342,28 +370,7 @@ async def submit_job_stream(
     Creates a job ID and tracks the job so users can reconnect with 'ci wait'.
     First sends the job ID, then streams all events. Uses controller pattern.
     """
-    import tempfile
-
-    job_id = str(uuid.uuid4())
-    zip_data = await file.read()
-
-    # Stash the zip file to a temporary location
-    fd, zip_file_path = tempfile.mkstemp(suffix=".zip", prefix=f"ci_job_{job_id}_")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(zip_data)
-    except Exception:
-        os.close(fd)
-        raise
-
-    # Create job entry in the database with zip file path and user ownership
-    job = Job(
-        id=job_id,
-        status="queued",
-        zip_file_path=zip_file_path,
-        user_id=user.id,
-    )
-    await repo.create_job(job)
+    job_id, _ = await create_job_from_upload(file, user, repo)
 
     async def event_generator():
         # First, send the job ID so client can print it
@@ -405,28 +412,7 @@ async def submit_job_async(
     Uses controller pattern: stashes zip file, creates queued job, and
     returns immediately. Controller handles execution in background.
     """
-    import tempfile
-
-    job_id = str(uuid.uuid4())
-    zip_data = await file.read()
-
-    # Stash the zip file to a temporary location
-    fd, zip_file_path = tempfile.mkstemp(suffix=".zip", prefix=f"ci_job_{job_id}_")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(zip_data)
-    except Exception:
-        os.close(fd)
-        raise
-
-    # Create job entry in the database with zip file path and user ownership
-    job = Job(
-        id=job_id,
-        status="queued",
-        zip_file_path=zip_file_path,
-        user_id=user.id,
-    )
-    await repo.create_job(job)
+    job_id, _ = await create_job_from_upload(file, user, repo)
 
     # Controller will pick up the queued job and start it
     return {"job_id": job_id}
