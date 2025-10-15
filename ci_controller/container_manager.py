@@ -74,18 +74,21 @@ class ContainerManager:
         """
         Create a Docker container for running tests.
 
+        Builds a custom Docker image with project files and dependencies,
+        then creates a container from that image.
+
         Args:
-            job_id: Unique job identifier (used as container name)
+            job_id: Unique job identifier (used as container name and image tag)
             zip_file_path: Path to zipped project file
 
         Returns:
             Tuple of (container_id, temp_dir_path)
-            The temp_dir_path must be kept alive for container execution
+            The temp_dir_path must be kept alive for image build context
 
         Raises:
-            RuntimeError: If container creation fails
+            RuntimeError: If image build or container creation fails
         """
-        # Create temporary directory for project files
+        # Create temporary directory for project files and Dockerfile
         temp_dir = tempfile.mkdtemp(prefix=f"ci_job_{job_id}_")
         temp_path = Path(temp_dir)
 
@@ -101,29 +104,61 @@ class ContainerManager:
             if not (temp_path / "requirements.txt").exists():
                 raise RuntimeError("requirements.txt not found in project")
 
-            # Create container (but don't start yet)
-            # Use prefixed job_id as container name for namespace isolation
-            container_name = self._get_container_name(job_id)
-            process = await asyncio.create_subprocess_exec(
+            # Create Dockerfile in temp directory
+            dockerfile_content = """FROM python:3.12-slim
+
+WORKDIR /workspace
+
+# Copy project files into the image
+COPY . /workspace/
+
+# Install dependencies
+RUN pip install --no-cache-dir -q -r requirements.txt
+
+# Run pytest by default
+CMD ["python", "-m", "pytest", "-v"]
+"""
+            dockerfile_path = temp_path / "Dockerfile"
+            dockerfile_path.write_text(dockerfile_content)
+
+            # Build Docker image
+            # Tag format: ci-job-{job_id}
+            image_tag = f"ci-job-{job_id}"
+            build_process = await asyncio.create_subprocess_exec(
                 "docker",
-                "create",
-                "--name",
-                container_name,
-                "-v",
-                f"{temp_path}:/workspace:ro",
-                "-w",
-                "/workspace",
-                self.image,
-                "sh",
-                "-c",
-                "pip install -q -r requirements.txt && python -m pytest -v",
+                "build",
+                "-t",
+                image_tag,
+                "-f",
+                str(dockerfile_path),
+                str(temp_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
 
-            stdout, stderr = await process.communicate()
+            _, build_stderr = await build_process.communicate()
 
-            if process.returncode != 0:
+            if build_process.returncode != 0:
+                raise RuntimeError(
+                    f"Failed to build Docker image: {build_stderr.decode()}"
+                )
+
+            # Create container from the built image
+            # Use prefixed job_id as container name for namespace isolation
+            container_name = self._get_container_name(job_id)
+            create_process = await asyncio.create_subprocess_exec(
+                "docker",
+                "create",
+                "--name",
+                container_name,
+                image_tag,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            stdout, stderr = await create_process.communicate()
+
+            if create_process.returncode != 0:
                 raise RuntimeError(f"Failed to create container: {stderr.decode()}")
 
             container_id = stdout.decode().strip()
@@ -324,12 +359,11 @@ class ContainerManager:
         Returns:
             List of ContainerInfo objects for containers matching CI naming pattern
         """
+        # List all containers (no ancestor filter since we now use custom images)
         process = await asyncio.create_subprocess_exec(
             "docker",
             "ps",
             "-a",
-            "--filter",
-            "ancestor=python:3.12-slim",
             "--format",
             "{{.Names}}",
             stdout=asyncio.subprocess.PIPE,
@@ -387,7 +421,7 @@ class ContainerManager:
 
     async def cleanup_container(self, job_id: str) -> None:
         """
-        Clean up a container and its associated resources.
+        Clean up a container and its associated resources (including the Docker image).
 
         Args:
             job_id: Job identifier (used as container name)
@@ -395,8 +429,26 @@ class ContainerManager:
         This is a best-effort operation that won't raise exceptions.
         """
         try:
+            # Remove container first
             container_name = self._get_container_name(job_id)
             await self.remove_container(container_name, force=True)
+        except Exception:
+            # Best effort - don't fail if cleanup fails
+            pass
+
+        try:
+            # Remove the associated Docker image
+            image_tag = f"ci-job-{job_id}"
+            process = await asyncio.create_subprocess_exec(
+                "docker",
+                "rmi",
+                "-f",
+                image_tag,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await process.communicate()
+            # Don't check return code - best effort cleanup
         except Exception:
             # Best effort - don't fail if cleanup fails
             pass
