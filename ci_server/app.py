@@ -256,7 +256,12 @@ async def stream_job_events(
 
     # Job finished, wait for reconciliation loop to finalize it
     # (The reconciliation loop sets the success field based on container exit code)
-    max_wait = 5  # 5 seconds max wait for finalization
+    # The reconciliation loop runs every 2 seconds, so we need to wait at least 2-3 cycles
+    # to handle various edge cases:
+    # - Controller might be in the middle of a cycle when container exits
+    # - System might be under load (especially in CI environments)
+    # - Docker operations might have slight delays
+    max_wait = 15  # 15 seconds max wait for finalization (allows ~7 reconciliation cycles)
     waited = 0
     final_job = await repo.get_job(job_id)
     while final_job and final_job.success is None and waited < max_wait:
