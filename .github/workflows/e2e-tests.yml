@@ -57,6 +57,8 @@ jobs:
   e2e-tests:
     name: E2E Tests
     runs-on: ubuntu-latest
+    env:
+      CI_PYTHON_BASE_IMAGE: python:3.12-slim
 
     steps:
       - name: Checkout code
@@ -66,6 +68,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Pre-pull Docker image
+        run: docker pull ${{ env.CI_PYTHON_BASE_IMAGE }}
 
       - name: Install dependencies
         run: |

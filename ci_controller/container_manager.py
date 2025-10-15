@@ -44,7 +44,9 @@ class ContainerManager:
     and cleaning up Docker containers that run pytest tests.
     """
 
-    def __init__(self, container_name_prefix: str = ""):
+    def __init__(
+        self, container_name_prefix: str = "", python_base_image: str = "python:3.12-slim"
+    ):
         """
         Initialize the container manager.
 
@@ -52,8 +54,10 @@ class ContainerManager:
             container_name_prefix: Optional prefix for container names.
                                   Containers are named as "{prefix}{job_id}".
                                   This enables parallel test execution without interference.
+            python_base_image: Docker base image for running Python tests.
+                              Defaults to "python:3.12-slim".
         """
-        self.image = "python:3.12-slim"
+        self.image = python_base_image
         self.container_name_prefix = container_name_prefix
 
     def _get_container_name(self, job_id: str) -> str:
@@ -105,7 +109,7 @@ class ContainerManager:
                 raise RuntimeError("requirements.txt not found in project")
 
             # Create Dockerfile in temp directory
-            dockerfile_content = """FROM python:3.12-slim
+            dockerfile_content = f"""FROM {self.image}
 
 WORKDIR /workspace
 

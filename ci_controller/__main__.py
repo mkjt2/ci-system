@@ -13,6 +13,7 @@ Environment Variables:
     CI_DB_PATH: Database path (default: ci_jobs.db)
     CI_CONTAINER_PREFIX: Container name prefix for namespace isolation (default: "")
     CI_RECONCILE_INTERVAL: Seconds between reconciliation loops (default: 2.0)
+    CI_PYTHON_BASE_IMAGE: Docker base image for Python (default: python:3.12-slim)
 """
 
 import argparse
@@ -45,6 +46,7 @@ Environment Variables:
   CI_DB_PATH              Database path (default: ci_jobs.db)
   CI_CONTAINER_PREFIX     Container name prefix for namespace isolation
   CI_RECONCILE_INTERVAL   Seconds between reconciliation loops (default: 2.0)
+  CI_PYTHON_BASE_IMAGE    Docker base image for Python (default: python:3.12-slim)
 
 Note: Command-line arguments override environment variables.
 
@@ -57,6 +59,9 @@ Examples:
 
   # Use container prefix for isolation
   ci-controller --container-prefix ci_test_
+
+  # Use custom Python base image
+  ci-controller --python-base-image python:3.11-slim
 
   # Enable debug logging
   ci-controller --log-level DEBUG
@@ -82,6 +87,13 @@ Examples:
         type=float,
         default=None,
         help="Seconds between reconciliation loops (default: CI_RECONCILE_INTERVAL env or 2.0)",
+    )
+
+    parser.add_argument(
+        "--python-base-image",
+        type=str,
+        default=None,
+        help="Docker base image for Python (default: CI_PYTHON_BASE_IMAGE env or python:3.12-slim)",
     )
 
     parser.add_argument(
@@ -159,6 +171,21 @@ def get_reconcile_interval(args: argparse.Namespace) -> float:
         return 2.0
 
 
+def get_python_base_image(args: argparse.Namespace) -> str:
+    """
+    Get the Python base image from CLI args or environment.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Docker base image for Python
+    """
+    if args.python_base_image is not None:
+        return args.python_base_image
+    return os.environ.get("CI_PYTHON_BASE_IMAGE", "python:3.12-slim")
+
+
 async def run_controller(args: argparse.Namespace) -> None:
     """
     Initialize and run the job controller.
@@ -173,11 +200,13 @@ async def run_controller(args: argparse.Namespace) -> None:
     db_path = get_database_path(args)
     container_prefix = get_container_prefix(args)
     reconcile_interval = get_reconcile_interval(args)
+    python_base_image = get_python_base_image(args)
 
     logger.info("Starting CI Controller")
     logger.info(f"  Database: {db_path}")
     logger.info(f"  Container prefix: {container_prefix or '(none)'}")
     logger.info(f"  Reconcile interval: {reconcile_interval}s")
+    logger.info(f"  Python base image: {python_base_image}")
 
     # Initialize repository
     repository = SQLiteJobRepository(db_path)
@@ -185,7 +214,9 @@ async def run_controller(args: argparse.Namespace) -> None:
     logger.info("Database initialized")
 
     # Initialize container manager
-    container_manager = ContainerManager(container_name_prefix=container_prefix)
+    container_manager = ContainerManager(
+        container_name_prefix=container_prefix, python_base_image=python_base_image
+    )
 
     # Initialize and start controller
     controller = JobController(
