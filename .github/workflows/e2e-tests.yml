@@ -78,4 +78,4 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run E2E tests
-        run: pytest tests/e2e/ -v
+        run: pytest tests/e2e/ -v -n 2
